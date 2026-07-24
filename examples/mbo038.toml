@@ -1,0 +1,18 @@
+# MBO-038, hAcyP1 amber + missense scan (reproduces the example notebook).
+name = "hAcyP1"
+protein_sequence = "AEGNTLISVDYEIFGKVQGVFFRKHTQAEGKKLGLVGWVQNTDRGTVQGQLQGPISKVRHMQEWLETRGSPKSHIDKANFNNEKVILKLDYSDFQIVK"
+substitutions = ["F", "Y", "M", "A", "TAG"]   # amino acids and/or literal codons ("TAG" = amber stop)
+truncation = 6
+adaptor_5 = "ggcgcGGTCTCC"
+adaptor_3 = "CCTCTGGcggcg"
+avoid_enzymes = ["BsaI"]
+platform = "twist_oligo_pools"    # pooled | arrayed | a uSort-M method slug
+max_oligo_length = 350
+seed = 7
+
+[optimization]
+species = "e_coli"
+method = "use_best_codon"    # use_best_codon | match_codon_usage | harmonize_rca
+max_random_iters = 100000
+# gc_max = 0.68             # e.g. IDT eBlock GC ceiling
+# gc_window = 50            # windowed GC (bp)

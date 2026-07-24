@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.ipynb_checkpoints/
+.DS_Store
+# generated library outputs
+out/
+# personal / experiment-specific notebooks (not part of the public examples)
+notebooks/personal/

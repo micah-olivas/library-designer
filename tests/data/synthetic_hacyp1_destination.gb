@@ -1,0 +1,25 @@
+LOCUS       synHACYP1                510 bp    DNA     circular UNK 01-JAN-1980
+DEFINITION  synthetic hAcyP1 destination vector (illustrative, not a real
+            construct).
+ACCESSION   synHACYP1
+VERSION     synHACYP1
+KEYWORDS    .
+SOURCE      .
+  ORGANISM  .
+            .
+FEATURES             Location/Qualifiers
+     CDS             complement(169..462)
+                     /label="ACYP1_HUMAN"
+     misc_feature    complement(1..120)
+                     /label="msGFP2"
+ORIGIN
+        1 aaacttttct cacatgccat tgttaccgtt tgaacagatg agttgggctt gtcatccaaa
+       61 tgggggtaat aggtcatgtc ccgatcgtag atgaactcta tagcgaaacg caccagttca
+      121 gagacggcaa agggccgtac atgcatcagt cagtcgtgtc ccataatgtt tcacaatctg
+      181 gaaatcgctg taatccagtt tcagaatcac tttttcgttg ttgaagttcg ctttatcaat
+      241 atggcttttc ggagagccgc gggtttccag ccattcctgc atatgacgca ctttgctgat
+      301 cggcccctgc agctggccct gcacggtgcc gcgatcggtg ttctgcaccc agccaaccag
+      361 gcccagtttt ttgccttccg cctgggtgtg tttgcggaag aaaacgccct gcactttgcc
+      421 aaagatttca tagtcaacgc taatcagggt gtttccttca gcggctgact cagctggtta
+      481 tttgcacgga tctcaactaa tcgaccacgc
+//
