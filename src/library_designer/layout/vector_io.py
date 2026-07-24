@@ -208,7 +208,6 @@ def _flip_features(features: list[Feature], n: int) -> list[Feature]:
     ]
 
 
-@lru_cache(maxsize=32)
 def resolve_destination(
     path: str,
     *,
@@ -219,9 +218,32 @@ def resolve_destination(
 ) -> DestinationContext:
     """Read ``path`` and locate the insert, returning a ``DestinationContext``.
 
-    Cached per (path, locating inputs) so ``build_reference`` and ``tile_library`` share
-    one read and one locate, keeping the reference and the emitted vectors consistent.
+    Cached per (path, the file's mtime and size, locating inputs) so ``build_reference``
+    and ``tile_library`` share one read and one locate, keeping the reference and the
+    emitted vectors consistent, while a plasmid edited on disk is read again rather than
+    served stale from an earlier call in the same session.
     """
+    try:
+        st = Path(path).stat()
+        stamp: tuple[int, int] | None = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        stamp = None            # let the reader below raise the real error
+    return _resolve_destination(
+        str(path), stamp, topology_override=topology_override, search_cds=search_cds,
+        insert_label=insert_label, anchors=anchors,
+    )
+
+
+@lru_cache(maxsize=32)
+def _resolve_destination(
+    path: str,
+    stamp: tuple[int, int] | None,
+    *,
+    topology_override: str | None = None,
+    search_cds: str | None = None,
+    insert_label: str | None = None,
+    anchors: tuple[str, str] | None = None,
+) -> DestinationContext:
     seq, topology, features = read_vector_file(path)
     if topology_override:
         topology = topology_override

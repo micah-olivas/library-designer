@@ -191,10 +191,14 @@ class Library:
         return self
 
     def drop_failed(self) -> "Library":
-        """Remove variants whose optimization failed (``variable_dna`` is NA)."""
+        """Remove variants whose optimization failed (``variable_dna`` is NA).
+
+        The design specs drop them too, so the record cannot list failures for variants
+        the library no longer contains."""
         if "variable_dna" in self.df.columns:
             self.df = self.df[self.df["variable_dna"].notna()].reset_index(drop=True)
         self.failed = {}
+        self.design_specs.pop("failed", None)
         return self
 
     # --- exports (return self so they chain) ----------------------------

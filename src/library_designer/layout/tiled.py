@@ -163,7 +163,9 @@ def assemble_oligo(reference: str, variant_cds: str, start: int, end: int,
 
 
 def site_positions(oligo: str, enzyme: str) -> tuple[list[int], list[int]]:
-    """(forward-strand hits, reverse-strand hits) of ``enzyme``'s recognition site."""
+    """(forward-strand hits, reverse-strand hits) of ``enzyme``'s recognition site.
+
+    A palindromic site reads the same on both strands, so each hit appears in both lists."""
     rec = ENZYME_SITES[enzyme].upper()
     rec_rc = reverse_complement(rec)
 
@@ -175,11 +177,18 @@ def site_positions(oligo: str, enzyme: str) -> tuple[list[int], list[int]]:
 
 def extra_sites(oligo: str, fwd_len: int, rev_len: int, enzyme: str) -> bool:
     """True if the oligo carries any recognition site beyond the two intended ones
-    (forward site right after the fwd primer; reverse site right before the rev primer)."""
-    rec_len = len(ENZYME_SITES[enzyme])
+    (forward site right after the fwd primer; reverse site right before the rev primer).
+
+    For a palindromic site both intended positions show up on both strands, so compare
+    the combined set of positions instead of each strand's list. No enzyme in
+    ``ENZYME_SITES`` is palindromic today, but a user-supplied one can be."""
+    rec = ENZYME_SITES[enzyme].upper()
+    rec_len = len(rec)
     fwd_hits, rev_hits = site_positions(oligo, enzyme)
     want_fwd = fwd_len
     want_rev = len(oligo) - rev_len - rec_len
+    if rec == reverse_complement(rec):
+        return set(fwd_hits) | set(rev_hits) != {want_fwd, want_rev}
     return fwd_hits != [want_fwd] or rev_hits != [want_rev]
 
 

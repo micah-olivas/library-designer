@@ -146,3 +146,31 @@ def test_codon_optimization_is_deterministic_given_seed():
     a, b = run(), run()
     assert a.reference == b.reference
     assert list(a.df["variable_dna"]) == list(b.df["variable_dna"])
+
+
+# --- design-specs hygiene -----------------------------------------------------
+
+def test_drop_failed_also_clears_the_design_specs_record():
+    """The design-specs JSON is the handoff record, so it must not keep listing
+    failures for variants the library no longer holds."""
+    spec = LibrarySpec(name="dropped", protein_sequence="MKAILVDE", substitutions=["A"])
+    lib = SubstitutionScan(spec).generate().codon_optimize()
+    lib.failed = {"K2A": "synthetic failure"}
+    lib.design_specs["failed"] = dict(lib.failed)
+
+    lib.drop_failed()
+    assert lib.failed == {}
+    assert "failed" not in lib.design_specs
+
+
+# --- spec rendering -----------------------------------------------------------
+
+def test_spec_html_shows_readable_placeholders():
+    """An unset field renders as words, not as the stray punctuation left behind when
+    the placeholder glyph was stripped."""
+    spec = LibrarySpec(name="x", protein_sequence="MKV", avoid_enzymes=[])
+    html = spec._repr_html_()
+    for label in ("platform", "max_oligo_length"):
+        cell = re.search(rf">{label}</th><td[^>]*>(.*?)</td>", html).group(1)
+        assert cell == "not set"
+    assert "no enzymes" in html

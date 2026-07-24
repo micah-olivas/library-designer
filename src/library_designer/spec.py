@@ -52,7 +52,7 @@ class TiledAssemblyParams:
     spacer_3: str = "T"                # base(s) between the overhang and the 3' recognition site
     vector_insert: str = "AGAGACCAAAAGGTCTCA"   # BsaI drop-out placeholder inserted into each destination vector
     primer_set: str = "subramanian2018"  # bundled set name or a path to a primer-set CSV (see primers.py)
-    primer_length: int = 20            # expected primer length (informational / QC)
+    primer_length: int = 20            # per-primer length assumed when sizing tiles to the budget
     tile_size: int | None = None       # override the per-tile window (bp); None means it is derived from the budget
 
     # Destination-vector backbone. Point at the plasmid you clone into and the per-tile
@@ -156,12 +156,12 @@ class LibrarySpec:
             ("adaptors", f"5' <code>{_esc(self.adaptor_5)}</code> &nbsp; 3' <code>{_esc(self.adaptor_3)}</code>"),
             (
                 "avoid",
-                f"{', '.join(map(_esc, self.avoid_enzymes)) or ', '} "
+                f"{', '.join(map(_esc, self.avoid_enzymes)) or 'no enzymes'} "
                 f"<span style='opacity:.6'>+ {len(self.avoid_patterns)} motif pattern(s)</span>",
             ),
             ("optimization", _esc(self._opt_line())),
-            ("platform", _esc(self.platform) if self.platform else ", "),
-            ("max_oligo_length", self.max_oligo_length if self.max_oligo_length is not None else ", "),
+            ("platform", _esc(self.platform) if self.platform else "not set"),
+            ("max_oligo_length", self.max_oligo_length if self.max_oligo_length is not None else "not set"),
             ("seed", self.seed),
         ]
         trs = "".join(

@@ -304,3 +304,19 @@ def test_gb_end_to_end_and_maps(tmp_path):
     labels = [(f.qualifiers.get("label") or [""])[0] for f in rec.features]
     assert any("drop-out" in x for x in labels)
     assert any("msGFP2" in x for x in labels)          # a carried-over backbone feature
+
+
+def test_edited_plasmid_file_is_read_again_not_served_from_cache(tmp_path):
+    """resolve_destination caches per path, so an edited plasmid used to come back
+    stale for the rest of the session (a notebook re-running a cell)."""
+    path = Path(_plasmid(tmp_path, CLEAN_CDS))
+    first = resolve_destination(str(path), search_cds=CLEAN_CDS)
+    assert first.located_region == CLEAN_CDS
+
+    other = "".join(_SAFE * 5) + "GCTAAACTG"          # a different in-frame CDS
+    assert other != CLEAN_CDS
+    _plasmid(tmp_path, other, name="p.gb")            # same filename, new contents
+    again = resolve_destination(str(path), search_cds=other)
+    assert again.located_region == other
+    # and the cache still serves an unchanged file without re-reading
+    assert resolve_destination(str(path), search_cds=other) is again

@@ -38,7 +38,7 @@ def codon_usage_figure(library, metric: str = "frequency", low_usage: float = 0.
                        compare: str | None = None, compare_label: str = "IDT"):
     """Return a matplotlib Figure of per-position codon usage along the CDS.
 
-    ``metric="frequency"`` (default) plots absolute host codon-usage frequency — the
+    ``metric="frequency"`` (default) plots absolute host codon-usage frequency. The
     WT backbone is a weaving landscape and each substitution's codon sits at its own
     frequency, so the plot is informative under any optimization method. Rare codons
     sit near the low-usage guide. ``metric="adaptiveness"`` plots relative

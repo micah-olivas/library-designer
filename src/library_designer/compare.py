@@ -1,12 +1,12 @@
 """Cross-check an externally codon-optimized CDS against the library's frozen WT
 reference. Built for pasting in the output of IDT's Codon Optimization Tool (the
-lab's long-time default) and seeing where it agrees or diverges — in particular
+lab's long-time default) and seeing where it agrees or diverges. In particular,
 whether IDT's choice would introduce a restriction/ribosome-binding motif that our
 design deliberately avoids (IDT's optimizer doesn't know about your Golden Gate
 enzymes).
 
 Both sequences are compared as coding regions only (no adaptors). Submit the
-**truncated** protein to IDT — the one the reference encodes (``spec.truncated_sequence``);
+**truncated** protein to IDT, the one the reference encodes (``spec.truncated_sequence``);
 the comparison warns if the pasted sequence encodes a different protein.
 """
 from __future__ import annotations
@@ -98,8 +98,8 @@ def compare_reference(library, other_dna: str, label: str = "IDT") -> ReferenceC
         if prot_other is None:
             note = f"{label} length {len(other)} nt is not a multiple of 3."
         elif len(prot_other) != len(prot_ref):
-            note = (f"{label} encodes {len(prot_other)} aa but the reference is {len(prot_ref)} aa "
-                    f"— submit the truncated protein (truncation={spec.truncation}), not the full one.")
+            note = (f"{label} encodes {len(prot_other)} aa but the reference is {len(prot_ref)} aa. "
+                    f"Submit the truncated protein (truncation={spec.truncation}), not the full one.")
         else:
             d = sum(a != b for a, b in zip(prot_ref, prot_other))
             note = f"{label} encodes a protein differing at {d} residue(s) from the reference."

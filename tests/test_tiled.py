@@ -286,3 +286,26 @@ def test_viz_figures(gck):
     for fig in (gck.plot_tiling(), gck.plot_codon_usage()):
         assert type(fig).__name__ == "Figure"
         plt.close(fig)
+
+
+# --- palindromic recognition sites --------------------------------------------
+
+def test_extra_sites_handles_a_palindromic_recognition_site():
+    """A palindromic site reads the same on both strands, so both intended positions
+    appear in both strand lists. Comparing per-strand lists flagged a clean oligo."""
+    from library_designer.checks import motifs
+    from library_designer.layout import tiled as layout
+
+    site = "GGCGCC"                                  # its own reverse complement
+    assert reverse_complement(site) == site
+    motifs.ENZYME_SITES["PalI"] = site
+    try:
+        fwd, rev = "A" * 20, "T" * 20
+        clean = (fwd + site + "A" + "TTTT" + "ATGATGATG" + "GGAG" + "T"
+                 + reverse_complement(site) + reverse_complement(rev))
+        assert not layout.extra_sites(clean, len(fwd), len(rev), "PalI")
+        # a third copy in the middle is a real extra site and must still be caught
+        dirty = clean[:40] + site + clean[40:]
+        assert layout.extra_sites(dirty, len(fwd), len(rev), "PalI")
+    finally:
+        del motifs.ENZYME_SITES["PalI"]
