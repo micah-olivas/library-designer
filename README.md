@@ -4,23 +4,73 @@ Design DNA libraries for commercial synthesis.
 
 ## Install
 
-This project uses [uv](https://docs.astral.sh/uv/) for environment management (the Python version, the venv, and dependencies). To set up, clone the repo and run 
+You need git and [uv](https://docs.astral.sh/uv/). uv handles the rest (the Python
+version, the virtual environment, and the dependencies), so you don't have to install
+Python 3.12 yourself. On macOS or Linux:
 
 ```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Clone the repo and build the environment:
+
+```bash
+git clone https://github.com/micah-olivas/library-designer.git
+cd library-designer
 uv sync
 ```
 
-or install the package into an existing environment:
+`uv sync` creates `.venv/` inside the repo, installs the dependencies, and installs
+library-designer itself in editable mode, so edits to `src/` take effect without a
+reinstall. Confirm it works:
 
 ```bash
-pip install git+https://github.com/micah-olivas/library-designer
+uv run pytest -q                                          # the test suite, a few seconds
+uv run python -c "from library_designer import LibrarySpec; print('ok')"
 ```
 
-Launch the notebooks with the project environment active (no kernel registration needed):
+Run anything inside that environment by prefixing it with `uv run`, or activate the venv
+once with `source .venv/bin/activate` and drop the prefix.
+
+### Notebooks
+
+The tutorials in `notebooks/tutorials/` run end to end on the bundled data in `examples/`,
+so they are the quickest way to see a whole workflow. Launch JupyterLab with the project
+environment active (no kernel registration needed):
 
 ```bash
 uv run --with jupyterlab jupyter lab
 ```
+
+Open `notebooks/tutorials/01-standard-scan.ipynb` first. `notebooks/templates/` holds
+copy-and-edit skeletons of the same workflows; put your own working copies in
+`notebooks/personal/`, which is git-ignored. See `notebooks/README.md` for what each
+notebook covers.
+
+### Installing into an existing environment
+
+If you want the package alone, without the notebooks and example data, install it into any
+Python 3.12+ environment:
+
+```bash
+pip install git+https://github.com/micah-olivas/library-designer.git
+```
+
+### OMEGA
+
+Only the `SequenceSet` assembly step needs [OMEGA](https://github.com/RomeroLab/omega),
+and library-designer calls it as a separate process rather than importing it (see
+[Explicitly-defined Libraries](#explicitly-defined-libraries)). Install it on its own,
+following its instructions, then point library-designer at the checkout:
+
+```bash
+git clone https://github.com/RomeroLab/omega.git ~/repos/omega
+export OMEGA_HOME=~/repos/omega     # or pass omega_home="~/repos/omega" at the call site
+```
+
+The runner expects the CLI at `$OMEGA_HOME/code/omega.py` and calls it with `python`. If
+OMEGA lives in its own conda env, name that interpreter with `OMEGA_PYTHON` (or
+`omega_python=`).
 
 ## Usage
 
