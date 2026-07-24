@@ -100,8 +100,8 @@ lib = SequenceSet(spec, proteins={
 print(lib.summary())
 lib.to_full_csv("out/designs_full.csv")
 ```
-For these libraries, library-designer works with [OMEGA](https://github.com/RomeroLab/omega) (Freschlin et al. 2026) to perform polled Golden Gate assembly
-from oligo pools. OMEGA runs separately as a subprocess aside from library-designer; it is never imported or bundled. Point at your checkout with `omega_home` (or the `OMEGA_HOME` env var). See the worked example at `notebooks/tutorials/03-omega-sequence-set.ipynb`.
+For these libraries, library-designer works with [OMEGA](https://github.com/RomeroLab/omega) (Freschlin et al. 2026) to perform pooled Golden Gate assembly
+from an oligo pool starting point. The OMEGA step runs separately as a subprocess aside from library-designer; it is never imported or bundled to abide by the terms of its GPL-3.0 license. Point at your checkout with `omega_home` (or the `OMEGA_HOME` env var). See the worked example at `notebooks/tutorials/03-omega-sequence-set.ipynb`.
 
 ```python
 from library_designer import OmegaParams
