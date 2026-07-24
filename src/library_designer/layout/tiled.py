@@ -60,7 +60,9 @@ def compute_tiles(cds_len: int, params: TiledAssemblyParams) -> list[tuple[int, 
     Boundaries fall on codon multiples so a mutated codon is never split across two
     tiles, and windows are balanced to the fewest tiles whose size fits the oligo
     budget. The 4-bp Golden Gate overhang each oligo carries is drawn from the
-    flanking WT CDS, so adjacent tiles need no explicit sequence overlap.
+    flanking WT CDS, so adjacent tiles need no explicit sequence overlap. That is also
+    why a terminal tile has to be at least ``overhang_len`` long once there is more than
+    one tile: the boundary it creates needs a full overhang of CDS on both sides.
     """
     if cds_len % 3 != 0:
         raise ValueError(f"Reference CDS length ({cds_len}) is not a multiple of 3.")
@@ -75,13 +77,25 @@ def compute_tiles(cds_len: int, params: TiledAssemblyParams) -> list[tuple[int, 
 
     codons = cds_len // 3
     tile_n = -(-codons // max_tile_codons)          # ceil: fewest tiles that fit the budget
-    per = -(-codons // tile_n)                       # ceil: balance codons across tiles
-    tiles = []
-    for i in range(tile_n):
-        s = i * per * 3
-        if s >= cds_len:
-            break
-        tiles.append((s, min(cds_len, (i + 1) * per * 3)))
+    # Spread the codons as evenly as the count allows: the first `wide` tiles take one
+    # extra codon. Repeating a ceil-sized window instead would leave the remainder in the
+    # last tile, which for some CDS lengths is a stub too short to carry an overhang.
+    per, wide = divmod(codons, tile_n)
+    sizes = [per + 1] * wide + [per] * (tile_n - wide)
+
+    min_codons = -(-params.overhang_len // 3)        # ceil: codons a full overhang spans
+    if tile_n > 1 and min(sizes[0], sizes[-1]) < min_codons:
+        raise ValueError(
+            f"Splitting a {cds_len} bp CDS into {tile_n} tiles gives a terminal tile of "
+            f"{min(sizes[0], sizes[-1]) * 3} bp, shorter than the {params.overhang_len} bp "
+            "Golden Gate overhang, so its fused overhang cannot be drawn from the flanking "
+            "CDS. Raise tiled.tile_size (or tiled.oligo_budget) to use fewer, longer tiles."
+        )
+
+    tiles, at = [], 0
+    for n in sizes:
+        tiles.append((at, at + n * 3))
+        at += n * 3
 
     covered = bytearray(cds_len)
     for s, e in tiles:
@@ -106,10 +120,15 @@ def tile_contexts(reference: str, start: int, end: int,
     """The two Golden Gate overhang sequences for a tile, flanking WT CDS bases, or
     the configured vector context when the tile abuts a CDS end.
 
+    Which one applies depends on *where the boundary is*, not on whether a full overhang
+    happens to fit: an internal boundary always takes CDS bases, because that is what its
+    destination vector presents at the junction. ``compute_tiles`` keeps every terminal
+    tile at least ``overhang_len`` long, so those bases always exist.
+
     QC uses this too, so the overhangs it checks are the ones the oligos carry."""
     o = params.overhang_len
-    ctx5 = reference[start - o:start] if start >= o else params.vector_context_5
-    ctx3 = reference[end:end + o] if end + o <= len(reference) else params.vector_context_3
+    ctx5 = params.vector_context_5 if start <= 0 else reference[start - o:start]
+    ctx3 = params.vector_context_3 if end >= len(reference) else reference[end:end + o]
     return ctx5, ctx3
 
 

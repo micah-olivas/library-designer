@@ -13,7 +13,7 @@ import pytest
 from library_designer import LibrarySpec, SubstitutionScan, TiledAssemblyParams
 from library_designer.checks.motifs import ENZYME_SITES, contains_enzyme_site
 from library_designer.checks.translation import translates_to
-from library_designer.layout.tiled import compute_tiles, extra_sites
+from library_designer.layout.tiled import compute_tiles, extra_sites, tile_contexts
 from library_designer.primers import load_primer_set
 from library_designer.regions import reverse_complement
 
@@ -63,6 +63,52 @@ def test_compute_tiles_cover_and_codon_aligned():
 def test_non_inframe_reference_rejected():
     with pytest.raises(ValueError):
         compute_tiles(100, TiledAssemblyParams())
+
+
+def test_tiles_split_evenly_and_never_leave_a_stub():
+    """Every tile boundary needs a full overhang of CDS on both sides, so no terminal
+    tile may be shorter than overhang_len. An even split is what keeps that true."""
+    params = TiledAssemblyParams()
+    o = params.overhang_len
+    for codons in range(2, 8000):
+        tiles = compute_tiles(codons * 3, params)
+        sizes = [e - s for s, e in tiles]
+        assert max(sizes) - min(sizes) <= 3          # balanced to within one codon
+        if len(tiles) > 1:
+            assert min(sizes[0], sizes[-1]) >= o     # both ends can carry an overhang
+
+
+def test_internal_boundaries_take_cds_bases_not_the_vector_context():
+    """The tile before a short final tile used to be handed the vector's terminal
+    overhang, which its destination vector does not present at that junction."""
+    params = TiledAssemblyParams(tile_size=9, oligo_budget=1000)
+    ref = "ATG" + "AAACCCGGGTTTACGTGCATCA"[:18]     # 21 bp, 7 codons
+    tiles = compute_tiles(len(ref), params)
+    for start, end in tiles:
+        ctx5, ctx3 = tile_contexts(ref, start, end, params)
+        assert ctx5 == (params.vector_context_5 if start == 0 else ref[start - 4:start])
+        assert ctx3 == (params.vector_context_3 if end == len(ref) else ref[end:end + 4])
+        assert len(ctx5) == 4 and len(ctx3) == 4     # a full overhang either way
+
+
+def test_tile_size_too_small_to_carry_an_overhang_is_refused():
+    # One codon per tile: 3 bp cannot supply the 4 bp overhang the next tile needs.
+    with pytest.raises(ValueError, match="overhang"):
+        compute_tiles(21, TiledAssemblyParams(tile_size=3, oligo_budget=1000))
+    # An even split rescues what a ceil-sized window would have left as a 1-codon stub:
+    # 7 codons in 3-codon tiles is 3 + 2 + 2, not 3 + 3 + 1.
+    assert compute_tiles(21, TiledAssemblyParams(tile_size=9, oligo_budget=1000)) == [
+        (0, 9), (9, 15), (15, 21)
+    ]
+
+
+def test_single_tile_needs_no_cds_overhang():
+    """One tile spanning the whole CDS takes both overhangs from the vector, so the
+    terminal-length rule does not apply to it."""
+    params = TiledAssemblyParams(oligo_budget=1000)
+    assert compute_tiles(3, params) == [(0, 3)]
+    ctx5, ctx3 = tile_contexts("ATG", 0, 3, params)
+    assert (ctx5, ctx3) == (params.vector_context_5, params.vector_context_3)
 
 
 # --- end to end ---------------------------------------------------------------
@@ -130,11 +176,9 @@ def test_single_wt_reference_invariant(gck):
 
 
 def test_tile_overhangs_distinct_and_non_palindromic(gck):
-    ref, o = gck.reference, gck.spec.tiled.overhang_len
-    p = gck.spec.tiled
+    ref = gck.reference
     for t in gck.tiles:
-        c5 = ref[t.start - o : t.start] if t.start >= o else p.vector_context_5
-        c3 = ref[t.end : t.end + o] if t.end + o <= len(ref) else p.vector_context_3
+        c5, c3 = tile_contexts(ref, t.start, t.end, gck.tiled_params)
         assert c5 != c3
         assert c5 != reverse_complement(c5) and c3 != reverse_complement(c3)
 
