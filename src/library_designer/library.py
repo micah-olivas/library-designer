@@ -34,6 +34,7 @@ class Library:
         self.kind = kind
         self.reference: str | None = None     # frozen WT CDS all variants are stamped onto (scan only)
         self.tiles: list | None = None         # tiled assembly: per-tile primers/window/vector (TileInfo)
+        self._tiled_params: TiledAssemblyParams | None = None   # what tile() actually laid out with
         self.omega = None                      # OmegaResult from assemble_with_omega(), if run
         self.failed: dict[str, str] = {}       # variant name -> optimization error
         # Design specs: the spec (incl. optimization params) fully determines the
@@ -107,6 +108,11 @@ class Library:
         if params is None:
             params = self.spec.tiled or TiledAssemblyParams()
         result = tile_library(self, params)
+        # The resolved params, terminal overhangs filled in from the starting vector when
+        # there is one. Everything downstream (QC, the vector exporters) reads these off
+        # the library rather than spec.tiled, so an explicit tile(params) is honored.
+        params = result["params"]
+        self._tiled_params = params
         self.df["tile"] = result["tile"]
         self.df["oligo"] = result["oligo"]
         self.df["oligo_length"] = self.df["oligo"].map(
@@ -123,6 +129,15 @@ class Library:
             "n_tiles": len(result["tiles"]),
         }
         return self
+
+    @property
+    def tiled_params(self) -> TiledAssemblyParams | None:
+        """The tiled-assembly params this library was laid out with, as resolved by
+        ``tile()``. QC, the vector exporters, and anything else that needs the layout
+        parameters read this instead of ``spec.tiled``, so a library tiled with an
+        explicit ``tile(params)`` is judged against what it was actually built with.
+        Falls back to ``spec.tiled`` before ``tile()`` has run."""
+        return self._tiled_params if self._tiled_params is not None else self.spec.tiled
 
     def check(self):
         """Run QC (optimization, translation, forbidden sites, length), returning a ``CheckReport``."""

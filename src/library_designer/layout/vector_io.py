@@ -247,14 +247,23 @@ def resolve_destination(
     )
 
 
-def locating_kwargs(spec) -> dict:
+def locating_kwargs(spec, params=None) -> dict:
     """The insert-locating inputs for ``resolve_destination``, derived from a spec so
     that reference extraction and tiling agree on the locus.
 
     When the reference is the vector's own CDS we cannot search for it (we are about to
     extract it), so locating leans on the label / CDS feature / anchors. Otherwise the
-    known CDS (``spec.cds``) is the search key, falling back to label / anchors."""
-    t = spec.tiled
+    known CDS (``spec.cds``) is the search key, falling back to label / anchors.
+
+    ``params`` is the tiled-assembly params actually in use, ``spec.tiled`` when omitted.
+    Pass it so a library tiled with an explicit ``tile(params)`` locates the same insert
+    its layout used."""
+    t = params if params is not None else spec.tiled
+    if t is None:
+        raise ValueError(
+            "No tiled-assembly params to locate the insert with. Pass "
+            "TiledAssemblyParams to tile() or set spec.tiled."
+        )
     anchors = tuple(t.insert_anchors) if t.insert_anchors else None
     search_cds = None if t.use_vector_cds else spec.cds
     return dict(

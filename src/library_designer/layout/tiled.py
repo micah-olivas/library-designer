@@ -101,13 +101,32 @@ def assign_tile(mut_index: int, tiles: list[tuple[int, int]]) -> int | None:
     return None
 
 
-def _context(reference: str, start: int, end: int, params: TiledAssemblyParams) -> tuple[str, str]:
+def tile_contexts(reference: str, start: int, end: int,
+                  params: TiledAssemblyParams) -> tuple[str, str]:
     """The two Golden Gate overhang sequences for a tile, flanking WT CDS bases, or
-    the configured vector context when the tile abuts a CDS end."""
+    the configured vector context when the tile abuts a CDS end.
+
+    QC uses this too, so the overhangs it checks are the ones the oligos carry."""
     o = params.overhang_len
     ctx5 = reference[start - o:start] if start >= o else params.vector_context_5
     ctx3 = reference[end:end + o] if end + o <= len(reference) else params.vector_context_3
     return ctx5, ctx3
+
+
+def _check_primer_length(primer_set: PrimerSet, params: TiledAssemblyParams) -> None:
+    """``params.primer_length`` is what sizes the tiles against the oligo budget (see
+    ``_overhead``), so a set whose primers are longer than that would push every oligo
+    past the budget. Refuse up front rather than emit an unorderable pool."""
+    lengths = [len(s) for _, s in primer_set.primers]
+    lengths += [len(s) for _, fwd, rev in primer_set.pairs for s in (fwd, rev)]
+    longest = max(lengths, default=0)
+    if longest > params.primer_length:
+        raise ValueError(
+            f"Primer set {primer_set.name!r} contains a {longest} bp primer but "
+            f"tiled.primer_length is {params.primer_length}, and that is what sizes the "
+            "tiles against the oligo budget. Set tiled.primer_length to the real primer "
+            "length so the budget accounts for it."
+        )
 
 
 def assemble_oligo(reference: str, variant_cds: str, start: int, end: int,
@@ -115,7 +134,7 @@ def assemble_oligo(reference: str, variant_cds: str, start: int, end: int,
     """The full synthesis oligo for one variant/tile (all uppercase)."""
     rec = ENZYME_SITES[params.enzyme].upper()
     rec_rc = reverse_complement(rec)
-    ctx5, ctx3 = _context(reference, start, end, params)
+    ctx5, ctx3 = tile_contexts(reference, start, end, params)
     tile = variant_cds[start:end]
     return (
         fwd + rec + params.spacer_5 + ctx5
@@ -199,7 +218,7 @@ def _assign_primers(tiles: list[tuple[int, int]], reference: str,
 
     out: list[tuple[str, str, str, str]] = []
     for start, end in tiles:
-        ctx5, ctx3 = _context(reference, start, end, params)
+        ctx5, ctx3 = tile_contexts(reference, start, end, params)
         fid, fwd = draw(lambda s: _end5_ok(s, ctx5, params))
         rid, rev = draw(lambda s: _end3_ok(s, ctx3, params))
         out.append((fid, fwd, rid, rev))
@@ -249,12 +268,14 @@ def tile_library(library, params: TiledAssemblyParams) -> dict:
     if params.starting_vector:
         from .vector_io import assemble_vector, locating_kwargs, resolve_destination, terminal_contexts
 
-        dest = resolve_destination(params.starting_vector, **locating_kwargs(library.spec))
+        dest = resolve_destination(params.starting_vector,
+                                   **locating_kwargs(library.spec, params))
         term5, term3 = terminal_contexts(dest, params.overhang_len)
         params = replace(params, vector_context_5=term5, vector_context_3=term3)
 
     tiles_coords = compute_tiles(len(reference), params)
     primer_set = load_primer_set(params.primer_set, params.enzyme)
+    _check_primer_length(primer_set, params)
     assignments = _assign_primers(tiles_coords, reference, primer_set, params)
 
     topology = dest.topology if dest is not None else "linear"
@@ -308,4 +329,5 @@ def tile_library(library, params: TiledAssemblyParams) -> dict:
         "primer_set": primer_set,
         "unplaced": unplaced,
         "vector_extra_sites": vector_extra,
+        "params": params,     # resolved (vector-derived terminal overhangs filled in)
     }

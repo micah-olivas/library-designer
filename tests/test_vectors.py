@@ -55,15 +55,16 @@ def _protein(cds: str) -> str:
 def _reconstitution(lib):
     """(checked, ok): excise each variant's tile between the BsaI sites, drop it back into
     the reference, and count how many rebuild the exact stamped mutant CDS."""
-    ref, o = lib.reference, lib.spec.tiled.overhang_len
+    p = lib.tiled_params
+    ref, o = lib.reference, p.overhang_len
     rec, rec_rc = "GGTCTC", reverse_complement("GGTCTC")
     checked = ok = 0
     for _, r in lib.df.iterrows():
         if not isinstance(r["oligo"], str):
             continue
         t = lib.tiles[int(r["tile"])]
-        i = r["oligo"].index(rec) + len(rec) + len(lib.spec.tiled.spacer_5)
-        j = r["oligo"].rindex(rec_rc) - len(lib.spec.tiled.spacer_3)
+        i = r["oligo"].index(rec) + len(rec) + len(p.spacer_5)
+        j = r["oligo"].rindex(rec_rc) - len(p.spacer_3)
         tile_seq = r["oligo"][i:j][o:-o]
         product = ref[: t.start] + tile_seq + ref[t.end:]
         checked += 1
@@ -138,6 +139,28 @@ def test_terminal_contexts_and_assemble_circular(tmp_path):
     # Dropping the CDS back in reproduces the original plasmid (rotated to CDS origin).
     rebuilt = assemble_vector(dest, CLEAN_CDS)
     assert rebuilt == CLEAN_CDS + BB3 + BB5
+
+
+def test_tile_params_carrying_a_starting_vector_without_a_spec_block(tmp_path):
+    """A starting vector passed through ``tile(params)`` rather than ``spec.tiled``.
+    Locating the insert, QC, and the map exporter all used to dereference spec.tiled."""
+    path = _plasmid(tmp_path, CLEAN_CDS)
+    spec = LibrarySpec(name="syn", protein_sequence=_protein(CLEAN_CDS), cds=CLEAN_CDS,
+                       substitutions=["A"])
+    assert spec.tiled is None
+    lib = SubstitutionScan(spec).generate().codon_optimize()
+    lib.tile(TiledAssemblyParams(oligo_budget=150, starting_vector=path))
+
+    assert lib.tiled_params.starting_vector == path
+    assert all(t.topology == "circular" for t in lib.tiles)
+    rep = lib.check()
+    assert not rep.vector_extra_sites and not rep.overhang_issues
+    checked, ok = _reconstitution(lib)
+    assert checked and ok == checked
+
+    lib.to_vector_maps(tmp_path / "maps")
+    assert (tmp_path / "maps" / "destination_vectors.csv").is_file()
+    assert len(list((tmp_path / "maps").glob("tile*_destination.gb"))) == len(lib.tiles)
 
 
 # --- end to end: freeze the vector's own CDS ----------------------------------

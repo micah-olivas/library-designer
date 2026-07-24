@@ -17,14 +17,15 @@ from .motifs import ENZYME_SITES, count_enzyme_sites  # noqa: F401  (ENZYME_SITE
 
 def check_tiled(library) -> dict:
     """Return tiled-specific findings as lists of offending variant/tile labels."""
-    from ..layout.tiled import extra_sites
+    from ..layout.tiled import extra_sites, tile_contexts
 
     spec = library.spec
-    params = spec.tiled
+    # The params the library was laid out with, not spec.tiled: an explicit
+    # tile(params) must be checked against the layout it actually produced.
+    params = library.tiled_params
     df = library.df
     tiles = library.tiles
     ref = library.reference
-    o = params.overhang_len
 
     extra: list[str] = []
     over_budget: list[str] = []
@@ -37,20 +38,12 @@ def check_tiled(library) -> dict:
         if len(oligo) > params.oligo_budget:
             over_budget.append(str(name))
 
-    # Terminal-tile overhangs come from the backbone flanking the CDS when a starting
-    # vector is set (same derivation tile_library used), else from the manual defaults.
-    if params.starting_vector:
-        from ..layout.vector_io import locating_kwargs, resolve_destination, terminal_contexts
-
-        dest = resolve_destination(params.starting_vector, **locating_kwargs(spec))
-        term5, term3 = terminal_contexts(dest, o)
-    else:
-        term5, term3 = params.vector_context_5, params.vector_context_3
-
+    # Overhangs come straight from the resolved params, whose terminal contexts
+    # tile_library already derived from the backbone when a starting vector is set. Using
+    # the same helper the oligos were built with keeps QC from drifting off the layout.
     overhang_issues: list[str] = []
     for t in tiles:
-        c5 = ref[t.start - o:t.start] if t.start >= o else term5
-        c3 = ref[t.end:t.end + o] if t.end + o <= len(ref) else term3
+        c5, c3 = tile_contexts(ref, t.start, t.end, params)
         if (
             c5 == c3                          # 5' and 3' overhangs identical, so not directional
             or c5 == reverse_complement(c5)    # palindromic, so it self-ligates

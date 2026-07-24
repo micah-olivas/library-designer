@@ -223,7 +223,7 @@ def to_vector_maps(library, directory: str | Path) -> None:
     sites, the drop-out, the two fused overhangs, the retained 5'/3' CDS arms, and any
     backbone features from the starting vector that do not overlap the insert."""
     _require_tiled(library)
-    params = library.spec.tiled
+    params = library.tiled_params
     if not params or not params.starting_vector:
         raise ValueError(
             "to_vector_maps needs tiled.starting_vector set (the destination plasmid to "
@@ -244,7 +244,8 @@ def to_vector_maps(library, directory: str | Path) -> None:
     from .layout.vector_io import locating_kwargs, resolve_destination
     from .regions import reverse_complement
 
-    dest = resolve_destination(params.starting_vector, **locating_kwargs(library.spec))
+    dest = resolve_destination(params.starting_vector,
+                               **locating_kwargs(library.spec, params))
     reference = library.reference
     stuffer = params.vector_insert.upper()
     site = ENZYME_SITES[params.enzyme].upper()

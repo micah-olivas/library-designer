@@ -139,6 +139,50 @@ def test_tile_overhangs_distinct_and_non_palindromic(gck):
         assert c5 != reverse_complement(c5) and c3 != reverse_complement(c3)
 
 
+# --- the params a library was actually tiled with ------------------------------
+
+SHORT_PROTEIN = "MKAILVGADEQTRWYFNSHCP" * 6
+
+
+def test_qc_runs_when_the_params_came_from_tile_not_the_spec():
+    """``tile(params)`` on a spec with no ``[tiled]`` block. QC and the summary must read
+    the params off the library; reaching for ``spec.tiled`` used to raise AttributeError."""
+    spec = LibrarySpec(name="p", protein_sequence=SHORT_PROTEIN, substitutions=["A"])
+    assert spec.tiled is None
+    lib = SubstitutionScan(spec).generate().codon_optimize()
+    lib.tile(TiledAssemblyParams(oligo_budget=300))
+
+    assert lib.tiled_params.oligo_budget == 300
+    rep = lib.check()
+    assert not rep.oligo_over_budget and not rep.overhang_issues
+    assert lib.summary().qc is not None
+
+
+def test_qc_judges_the_params_used_not_the_spec_block():
+    """A stale/tight ``spec.tiled`` budget must not condemn a layout built with another."""
+    spec = LibrarySpec(name="p", protein_sequence=SHORT_PROTEIN, substitutions=["A"],
+                       tiled=TiledAssemblyParams(oligo_budget=200))
+    lib = SubstitutionScan(spec).generate().codon_optimize()
+    lib.tile(TiledAssemblyParams(oligo_budget=1000))          # laid out generously
+
+    assert lib.tiled_params.oligo_budget == 1000
+    assert int(lib.df["oligo_length"].dropna().max()) > 200   # legitimately over spec.tiled
+    assert not lib.check().oligo_over_budget                  # judged at the budget used
+    assert lib.design_specs["tiled"]["params"]["oligo_budget"] == 1000
+
+
+def test_primer_set_longer_than_primer_length_refused(tmp_path):
+    """primer_length sizes the tiles, so a set of longer primers must be refused rather
+    than silently push every oligo past the budget."""
+    csv = tmp_path / "long_primers.csv"
+    csv.write_text("primer_id,sequence\n" + "".join(f"P{i},{'ACGT' * 7}\n" for i in range(8)))
+    spec = LibrarySpec(name="p", protein_sequence=SHORT_PROTEIN, substitutions=["A"],
+                       tiled=TiledAssemblyParams(primer_set=str(csv), primer_length=20))
+    lib = SubstitutionScan(spec).generate().codon_optimize()
+    with pytest.raises(ValueError, match="primer_length"):
+        lib.tile()
+
+
 # --- native-CDS validation ----------------------------------------------------
 
 def test_native_cds_with_internal_bsai_site_raises():
