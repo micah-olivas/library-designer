@@ -91,7 +91,10 @@ class LibrarySpec:
     optimization: CodonOptimizationParams = field(default_factory=CodonOptimizationParams)
     platform: str | None = None              # synthesis platform: "pooled"/"arrayed" or a provider slug ("twist_oligo_pools"); see methods.py
     max_oligo_length: int | None = None      # hard synthesis-length cap (bp, incl. adaptors)
-    seed: int = 0                            # RNG seed for reproducible optimization
+    # Codon optimization is stochastic, so a seed is applied on every run and recorded in
+    # the design specs: the same spec gives the same library on any machine. Set to None
+    # to opt out and follow the ambient RNG instead.
+    seed: int | None = 0
 
     @property
     def truncated_sequence(self) -> str:

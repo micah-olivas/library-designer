@@ -103,6 +103,11 @@ By default, `codon_optimize()` optimizes the WT CDS once into a frozen reference
 
 Substitutions accept amino acids, where the optimizer picks the codon, or literal codons (e.g. `"TAG"`), which are placed verbatim and protected. Codon-optimization parameters (species, method, GC window, iterations) live on `CodonOptimizationParams` and are recorded in `to_design_specs()`, so every order documents how it was generated.
 
+Codon optimization searches stochastically, so it is seeded on every run and the seed is
+recorded with the design. Re-running a spec rebuilds the same library, on any machine,
+and your own `numpy.random` state is left as it was. Change `spec.seed` for a different
+draw, or set it to `None` to follow the ambient RNG.
+
 ## Tiled assembly
 
 When the defined CDS is longer than the maximum pooled oligo/fragment length, tiled assembly splits the CDS into acceptable-length tiles and designs one pool in which each tile is a sublibrary flanked by its own orthogonal primer pair. Each sublibrary may then be amplified out of the pool and assembled by Golden Gate into a per-tile destination vector that carries the rest of the WT CDS.

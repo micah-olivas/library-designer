@@ -36,8 +36,11 @@ def optimize_independent(library, seed: int | None = None):
     variable: list = []
     failed: dict[str, str] = {}
     for i, (name, protein) in enumerate(zip(df["name"], df["protein"])):
+        # A per-member offset keeps members from sharing one stream; seed=None (opted out
+        # of reproducibility on the spec) stays None rather than becoming an offset.
+        member_seed = None if base is None else base + i
         try:
-            variable.append(codon_optimize(str(protein), spec, seed=base + i))
+            variable.append(codon_optimize(str(protein), spec, seed=member_seed))
         except Exception as exc:   # DNA Chisel can't satisfy the constraints for this member
             variable.append(pd.NA)
             failed[str(name)] = f"{type(exc).__name__}: {exc}"

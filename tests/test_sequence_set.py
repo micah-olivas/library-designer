@@ -105,3 +105,33 @@ def test_rejects_non_amino_acid():
 def test_empty_set_errors():
     with pytest.raises(ValueError, match="at least one"):
         SequenceSet(_spec(), {}).generate()
+
+
+# --- reproducibility ----------------------------------------------------------
+
+def test_members_are_reproducible_and_ambient_rng_independent():
+    """Each member gets its own seed offset, so the whole set rebuilds identically
+    regardless of where the caller's RNG sits."""
+    import numpy as np
+
+    np.random.seed(1)
+    first = list(SequenceSet(_spec(), PROTEINS).generate().codon_optimize().df["variable_dna"])
+    np.random.seed(888)
+    second = list(SequenceSet(_spec(), PROTEINS).generate().codon_optimize().df["variable_dna"])
+    assert first == second
+
+    # Distinct offsets, not one shared stream: identical proteins would still differ only
+    # by their seed, so check the offsets reach the members rather than colliding.
+    assert len(set(first)) == len(first)
+
+
+def test_unseeded_sequence_set_runs():
+    """seed=None must reach each member as None instead of being offset into an error."""
+    import numpy as np
+
+    np.random.seed(3)
+    lib = SequenceSet(_spec(seed=None), PROTEINS).generate().codon_optimize()
+    assert not lib.failed
+    assert lib.design_specs["seed"] is None
+    for protein, dna in zip(lib.df["protein"], lib.df["variable_dna"]):
+        assert translate(dna) == protein

@@ -174,3 +174,91 @@ def test_spec_html_shows_readable_placeholders():
         cell = re.search(rf">{label}</th><td[^>]*>(.*?)</td>", html).group(1)
         assert cell == "not set"
     assert "no enzymes" in html
+
+
+# --- reproducibility ----------------------------------------------------------
+
+# A stochastic configuration: match_codon_usage samples, and the GC ceiling plus the
+# avoid patterns force the constraint solver to search, so an unpinned RNG would show.
+_DET_PROTEIN = "MKAILVGADEQTRWYFNSHCPMKAILVGADEQ"
+
+
+def _det_spec(**kwargs):
+    from library_designer import CodonOptimizationParams
+
+    return LibrarySpec(
+        name="det", protein_sequence=_DET_PROTEIN, substitutions=["A"],
+        optimization=CodonOptimizationParams(method="match_codon_usage", gc_max=0.62),
+        **kwargs,
+    )
+
+
+def test_codon_optimize_ignores_the_ambient_rng():
+    """The spec's seed is applied on every call, so where the caller's RNG happens to be
+    cannot change the design. Calling the wrapper directly used to skip seeding."""
+    import numpy as np
+
+    from library_designer.optimize.codon import codon_optimize
+
+    spec = _det_spec()
+    np.random.seed(1)
+    first = codon_optimize(_DET_PROTEIN, spec)
+    np.random.seed(999)
+    second = codon_optimize(_DET_PROTEIN, spec)
+    assert first == second
+
+
+def test_optimization_leaves_the_callers_rng_untouched():
+    """Seeding numpy globally is how DNA Chisel is pinned, but it must not leak: the
+    caller's own draws used to silently inherit our seed."""
+    import numpy as np
+
+    np.random.seed(4321)
+    expected = np.random.rand(3).tolist()
+
+    np.random.seed(4321)
+    SubstitutionScan(_det_spec()).generate().codon_optimize()
+    assert np.random.rand(3).tolist() == expected
+
+
+def test_seed_none_opts_out_and_follows_the_ambient_rng():
+    import numpy as np
+
+    spec = _det_spec(seed=None)
+    np.random.seed(7)
+    before = np.random.get_state()[1].copy()
+    a = SubstitutionScan(spec).generate().codon_optimize().reference
+    assert not np.array_equal(before, np.random.get_state()[1])   # stream consumed, not restored
+
+    np.random.seed(7)
+    b = SubstitutionScan(spec).generate().codon_optimize().reference
+    assert a == b                                                # ambient seed governs it
+
+
+def test_seed_is_recorded_in_the_design_specs():
+    lib = SubstitutionScan(_det_spec(seed=11)).generate().codon_optimize()
+    assert lib.design_specs["seed"] == 11
+    assert lib.design_specs["reference_cds"] == lib.reference
+
+
+def test_same_spec_reproduces_in_a_fresh_process():
+    """Reproducibility has to survive a new interpreter, including hash randomization,
+    since that is what re-running a design next month actually looks like."""
+    import os
+    import subprocess
+    import sys
+
+    script = (
+        "from library_designer import LibrarySpec, SubstitutionScan, CodonOptimizationParams;"
+        f"spec = LibrarySpec(name='det', protein_sequence={_DET_PROTEIN!r}, substitutions=['A'],"
+        "optimization=CodonOptimizationParams(method='match_codon_usage', gc_max=0.62));"
+        "print(SubstitutionScan(spec).generate().codon_optimize().reference)"
+    )
+    runs = []
+    for hashseed in ("0", "12345"):
+        proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                              env={**os.environ, "PYTHONHASHSEED": hashseed})
+        assert proc.returncode == 0, proc.stderr
+        runs.append(proc.stdout.strip())
+    assert runs[0] == runs[1]
+    assert runs[0] == SubstitutionScan(_det_spec()).generate().codon_optimize().reference

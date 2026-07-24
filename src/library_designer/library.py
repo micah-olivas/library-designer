@@ -64,6 +64,11 @@ class Library:
 
         A member that can't satisfy the sequence rules is recorded in ``self.failed``
         with ``variable_dna`` set to NA.
+
+        Reproducible by default: ``seed`` falls back to ``spec.seed`` (0 unless changed)
+        and is recorded in the design specs, so re-running a spec rebuilds the same
+        library. The caller's own ``numpy.random`` state is left untouched. Set
+        ``spec.seed = None`` for an unseeded run.
         """
         base = self.spec.seed if seed is None else seed
 
