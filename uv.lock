@@ -298,18 +298,12 @@ name = "library-designer"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "biopython" },
     { name = "dnachisel" },
+    { name = "matplotlib" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "python-codon-tables" },
-]
-
-[package.optional-dependencies]
-tiled = [
-    { name = "biopython" },
-]
-viz = [
-    { name = "matplotlib" },
 ]
 
 [package.dev-dependencies]
@@ -319,14 +313,13 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "biopython", marker = "extra == 'tiled'", specifier = ">=1.80" },
+    { name = "biopython", specifier = ">=1.80" },
     { name = "dnachisel", specifier = ">=3.2" },
-    { name = "matplotlib", marker = "extra == 'viz'", specifier = ">=3.8" },
+    { name = "matplotlib", specifier = ">=3.8" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pandas", specifier = ">=2.0" },
     { name = "python-codon-tables", specifier = ">=0.1" },
 ]
-provides-extras = ["viz", "tiled"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=9.1.1" }]

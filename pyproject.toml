@@ -11,15 +11,9 @@ dependencies = [
     "numpy>=1.26",
     "dnachisel>=3.2",
     "python_codon_tables>=0.1",   # species codon-usage tables for backbone-and-stamp optimization
+    "matplotlib>=3.8",            # codon-usage and tile-layout QC plots
+    "biopython>=1.80",            # read starting plasmids (.gb / .dna / .fasta), write GenBank maps
 ]
-
-[project.optional-dependencies]
-# Codon-usage QC plots. Optional, install with: uv sync --extra viz
-viz = ["matplotlib>=3.8"]
-
-# Tiled-assembly destination vectors: read the starting plasmid (.gb / .dna / .fasta)
-# and write annotated GenBank maps. Install with: uv sync --extra tiled
-tiled = ["biopython>=1.80"]
 
 [build-system]
 requires = ["hatchling"]

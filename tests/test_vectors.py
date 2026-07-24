@@ -2,15 +2,13 @@
 
 A synthetic plasmid is written to a temp GenBank file per test, so nothing binary is
 committed and the whole path (read -> locate -> splice -> QC -> emit) is exercised with
-BioPython. Skipped entirely when the ``tiled`` extra (BioPython) is not installed.
+BioPython.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
-
-pytest.importorskip("Bio")
 
 from Bio.Seq import Seq
 

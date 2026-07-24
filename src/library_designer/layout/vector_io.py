@@ -7,7 +7,7 @@ This module reads that backbone from a ``.gb`` / ``.dna`` / ``.fasta`` file, fin
 insert locus, and reduces everything to three facts the assembler needs: the bases
 just 5' of the insert, the bases just 3' of it, and whether the molecule is circular.
 
-Reading the files needs BioPython (behind the ``tiled`` extra). One dependency covers
+Reading the files needs BioPython. One dependency covers
 GenBank, SnapGene ``.dna``, and FASTA, and it surfaces the topology and feature
 annotations we use to locate the insert and to carry features onto the emitted maps.
 BioPython reads ``.dna`` but cannot write it, so emitted maps are GenBank.
@@ -71,9 +71,8 @@ def _require_biopython():
         from Bio import SeqIO  # noqa: F401
     except ImportError as exc:
         raise ImportError(
-            "Reading a starting vector (.gb / .dna / .fasta) needs BioPython. "
-            "Install the tiled extra:  pip install 'library-designer[tiled]'  "
-            "(or  uv sync --extra tiled)."
+            "Reading a starting vector (.gb / .dna / .fasta) needs BioPython, a base "
+            "dependency. Reinstall library-designer if it is missing."
         ) from exc
     return SeqIO
 

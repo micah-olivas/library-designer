@@ -218,7 +218,7 @@ def to_vector_maps(library, directory: str | Path) -> None:
     """Write one annotated GenBank map per tile, the destination plasmids to clone.
 
     Requires ``tiled.starting_vector`` (the backbone supplies the full plasmid to
-    annotate) and the ``tiled`` extra (BioPython). Emits ``tile{i}_destination.gb`` for
+    annotate). Emits ``tile{i}_destination.gb`` for
     every tile plus a ``destination_vectors.csv`` manifest. Each map carries the two BsaI
     sites, the drop-out, the two fused overhangs, the retained 5'/3' CDS arms, and any
     backbone features from the starting vector that do not overlap the insert."""
@@ -236,8 +236,8 @@ def to_vector_maps(library, directory: str | Path) -> None:
         from Bio.SeqRecord import SeqRecord
     except ImportError as exc:
         raise ImportError(
-            "Writing GenBank destination maps needs BioPython. Install the tiled extra: "
-            "pip install 'library-designer[tiled]'  (or  uv sync --extra tiled)."
+            "Writing GenBank destination maps needs BioPython, a base dependency. "
+            "Reinstall library-designer if it is missing."
         ) from exc
 
     from .checks.motifs import ENZYME_SITES
