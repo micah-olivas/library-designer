@@ -73,7 +73,7 @@ lib.to_vectors("out/vectors.csv")                # per-tile Golden Gate destinat
 
 The WT reference is either codon-optimized (the default) or a native CDS supplied with `cds=`. Designed sequences are screened for enzyme sites to ensure orthogonality. Orthogonal primers come from a validated set ([Subramanian et al. 2018](https://doi.org/10.1093/synbio/ysx008)) by default, or may be provided with `tiled.primer_set=<path>`.
 
-To generate destination vectors for downstream tiled assembly, point `tiled.starting_vector` at the starting plasmid (`.gb`, `.dna`, or `.fasta`) containing the WT CDS. The parent vector is screened for stray Golden Gate assembly sites to prevent off-target cleavage. Set `use_vector_cds=true` to freeze the CDS already in the plasmid and clone the vectors straight from it, which flags undesirable motifs in the CDS instead of recoding them. Reading plasmid files and writing GenBank needs the `tiled` extra (`uv sync --extra tiled`).
+To generate destination vectors for downstream tiled assembly, point `tiled.starting_vector` at the starting plasmid (`.gb`, `.dna`, or `.fasta`) containing the WT CDS. The parent vector is screened for stray Golden Gate assembly sites to prevent off-target cleavage. Set `use_vector_cds=true` to freeze the CDS already in the plasmid and clone the vectors straight from it, which flags undesirable motifs in the CDS instead of recoding them.
 
 ```python
 spec.tiled.starting_vector = "my_destination.gb"   # .gb / .dna / .fasta
@@ -122,4 +122,4 @@ The same library serializes several ways.
 | `to_oligo_pool` | synthesis provider, tiled | one pool of assembled tile oligos |
 | `to_primer_order` | synthesis provider, tiled | per-tile amplification primers (IDT) |
 | `to_vectors` | cloning, tiled | per-tile destination-vector sequences (manifest CSV) |
-| `to_vector_maps` | cloning, tiled | annotated GenBank plasmid per tile (needs a starting vector + the `tiled` extra) |
+| `to_vector_maps` | cloning, tiled | annotated GenBank plasmid per tile (needs a starting vector) |

@@ -59,7 +59,7 @@ class TiledAssemblyParams:
     # destination vectors are emitted as the full plasmid (see layout/vector_io.py and
     # io.to_vector_maps). Without one, only the CDS-region cassette is emitted and the
     # two vector_context overhangs below are read verbatim.
-    starting_vector: str | None = None   # path to the destination plasmid (.gb / .dna / .fasta), needs the `tiled` extra
+    starting_vector: str | None = None   # path to the destination plasmid (.gb / .dna / .fasta)
     use_vector_cds: bool = False         # freeze the CDS already in the starting vector as the reference (clone from it)
     insert_label: str | None = None      # locate the insert site by an annotated feature label (else the WT CDS is matched)
     insert_anchors: tuple[str, str] | None = None  # fallback: (5', 3') unique sequences bracketing the insert site

@@ -194,7 +194,7 @@ def test_usortm_export_rejects_tiled(gck, tmp_path):
 
 
 def test_viz_figures(gck):
-    plt = pytest.importorskip("matplotlib.pyplot")   # skipped without the viz extra
+    import matplotlib.pyplot as plt
     for fig in (gck.plot_tiling(), gck.plot_codon_usage()):
         assert type(fig).__name__ == "Figure"
         plt.close(fig)

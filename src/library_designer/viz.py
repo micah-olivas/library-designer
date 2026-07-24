@@ -5,8 +5,6 @@ codon) along the CDS: the WT backbone as a line, and each variant's stamped codo
 as a point coloured by sublibrary. Points below the threshold flag codons the
 motif-avoidance had to compromise on. Amber (`*`) stamps are expected to sit low.
 a stop codon is pinned, not optimized.
-
-Requires the ``viz`` extra (matplotlib): ``uv sync --extra viz``.
 """
 from __future__ import annotations
 
@@ -28,7 +26,8 @@ def _new_figure(**kwargs):
         import matplotlib.pyplot as plt
     except ImportError as exc:
         raise ImportError(
-            "Plotting requires matplotlib, install the viz extra: `uv sync --extra viz`."
+            "Plotting requires matplotlib, a base dependency. "
+            "Reinstall library-designer if it is missing."
         ) from exc
     fig = plt.figure(**kwargs)
     plt.close(fig)

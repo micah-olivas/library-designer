@@ -151,15 +151,14 @@ class Library:
                          compare_label: str = "IDT"):
         """Return a codon-usage QC Figure (renders inline in a notebook). ``metric`` is
         'frequency' (absolute usage, default) or 'adaptiveness'. Pass ``compare`` an
-        external CDS (e.g. IDT's WT optimization) to overlay it as a dashed line.
-        Requires the ``viz`` extra."""
+        external CDS (e.g. IDT's WT optimization) to overlay it as a dashed line."""
         from .viz import codon_usage_figure
 
         return codon_usage_figure(self, metric=metric, compare=compare, compare_label=compare_label)
 
     def plot_tiling(self):
-        """Return a tile-layout Figure (renders inline in a notebook). Requires the
-        ``viz`` extra and a tiled library, call ``tile()`` first."""
+        """Return a tile-layout Figure (renders inline in a notebook). Needs a tiled
+        library, call ``tile()`` first."""
         from .viz import tiling_figure
 
         return tiling_figure(self)
@@ -216,7 +215,7 @@ class Library:
         Each ``.gb`` is the full destination vector (backbone with that tile's window
         dropped out) with the two BsaI sites, the drop-out, the fused overhangs, the
         retained CDS arms, and the tile window annotated, plus a ``destination_vectors.csv``
-        manifest. Requires a ``tiled.starting_vector`` and the ``tiled`` extra (BioPython)."""
+        manifest. Requires a ``tiled.starting_vector``."""
         _io.to_vector_maps(self, directory)
         return self
 
@@ -267,8 +266,8 @@ class Library:
         """Write the full output set into ``output_dir``: master CSV, uSort-M
         ``variants.csv``, vendor order form, the design-specs JSON
         (``<name>_design_specs.json``, the record uSort-M reads), and the
-        codon-usage QC plot. The plot is best-effort, if the ``viz`` extra isn't
-        installed the data files still export (with a warning)."""
+        codon-usage QC plot. The plot is best-effort; if it can't be rendered the
+        data files still export (with a warning)."""
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
         name = self.spec.name
@@ -279,10 +278,10 @@ class Library:
         if plots:
             try:
                 self.to_qc_plots(out / f"{name}_codon_usage.png")
-            except ImportError as exc:
+            except Exception as exc:
                 import warnings
                 warnings.warn(
-                    f"Skipping QC plot ({exc}). Install the viz extra: uv sync --extra viz",
+                    f"Skipping QC plot ({exc}).",
                     RuntimeWarning, stacklevel=2,
                 )
         return self
