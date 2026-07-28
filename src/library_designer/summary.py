@@ -15,6 +15,19 @@ from .regions import assemble
 
 @dataclass
 class LibrarySummary:
+    """A library at a glance, with its QC report attached. Printing it gives the block the
+    notebooks show.
+
+    ``per_sublibrary`` groups a scan by mutant residue, with the WT control under ``"WT"``.
+    A sequence set has no such grouping, since every member is a distinct sequence, so it
+    reports a single ``"members"`` bucket instead. ``adaptors`` carries the two sequences
+    and their lengths, plus the construct-length range once at least one member has been
+    optimized. ``qc`` is None until ``codon_optimize()`` has run, because there are no
+    sequences to check before that.
+
+    Built by ``summarize()``, which is what ``Library.summary()`` calls.
+    """
+
     name: str
     n_variants: int
     n_optimized: int
@@ -24,9 +37,16 @@ class LibrarySummary:
     adaptors: dict                      # 5'/3' sequences, lengths, construct-length range
     platform: str | None
     qc: CheckReport | None
+    starting_vector: str | None = None  # the destination plasmid, when the spec names one
 
     @property
     def ok(self) -> bool:
+        """True when nothing failed optimization and QC passed.
+
+        False before ``codon_optimize()``, since ``qc`` is None and there is no report to
+        pass. The ``n_failed`` clause is belt and braces on top of ``qc.passed``, because a
+        member whose optimization failed is also listed in ``qc.optimization_failed``.
+        """
         return self.n_failed == 0 and self.qc is not None and self.qc.passed
 
     def __str__(self) -> str:
@@ -50,6 +70,8 @@ class LibrarySummary:
             f"  adaptors: 5' {a['5_prime']!r} ({a['len_5']} bp), "
             f"3' {a['3_prime']!r} ({a['len_3']} bp){crange}"
         )
+        if self.starting_vector:
+            lines.append(f"  starting vector: {self.starting_vector}")
         o = self.optimization
         lines.append(
             f"  optimization: species={o.get('species')}, method={o.get('method')}, "
@@ -78,8 +100,11 @@ def summarize(library) -> LibrarySummary:
     if getattr(library, "kind", "scan") == "sequence_set":
         per_sub["members"] = len(df)
     else:
+        # Counts are added into the bucket, not assigned: unmutated rows can carry either
+        # NA sentinel (NaN or pd.NA, which value_counts keeps apart), and both are WT.
         for key, val in df["mut_residue"].value_counts(dropna=False).items():
-            per_sub["WT" if pd.isna(key) else str(key)] = int(val)
+            label = "WT" if pd.isna(key) else str(key)
+            per_sub[label] = per_sub.get(label, 0) + int(val)
 
     adaptors = {
         "5_prime": spec.adaptor_5,
@@ -106,4 +131,7 @@ def summarize(library) -> LibrarySummary:
         adaptors=adaptors,
         platform=spec.platform,
         qc=check_library(library) if optimized else None,
+        starting_vector=(
+            vec.path if (vec := spec.resolve_vector(getattr(library, "tiled_params", None))) else None
+        ),
     )

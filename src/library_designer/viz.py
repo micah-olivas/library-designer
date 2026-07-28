@@ -52,6 +52,14 @@ def codon_usage_figure(library, metric: str = "frequency", low_usage: float = 0.
     from .optimize.backbone import codon_frequency, relative_adaptiveness
 
     if library.reference is None:
+        if getattr(library, "kind", "scan") == "sequence_set":
+            # The plot draws each variant's stamped codon against the shared WT backbone, and
+            # a sequence set has no shared backbone: its members are independent genes.
+            raise ValueError(
+                "The codon-usage plot compares each variant's stamped codon against one "
+                "shared reference, which a sequence set does not have (every member is its "
+                "own gene). Plot a member's sequence yourself, or use a SubstitutionScan."
+            )
         raise ValueError("Library is not codon-optimized yet, call codon_optimize() first.")
 
     spec = library.spec
@@ -135,7 +143,10 @@ def tiling_figure(library):
 
     for t in tiles:
         colour = _PALETTE[t.index % len(_PALETTE)]
-        n = int((df["tile"] == t.index).sum()) if "tile" in df.columns else 0
+        # Mutants only. The tile also carries a WT control, which has no position, so the
+        # histogram above leaves it out too.
+        n = int(df.loc[df["tile"] == t.index, "mut_index"].notna().sum()) \
+            if "tile" in df.columns else 0
         ax.barh(t.index, t.end - t.start, left=t.start, height=0.72,
                 color=colour, alpha=0.9, edgecolor="white")
         ax.text((t.start + t.end) / 2, t.index, f"tile {t.index}  ·  {n} variants",

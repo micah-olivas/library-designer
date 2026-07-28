@@ -17,6 +17,28 @@ from dataclasses import dataclass, field
 
 @dataclass
 class ReferenceComparison:
+    """Where an outside CDS agrees with the library's frozen reference and where it does
+    not. Printing it gives the readable report.
+
+    ``label`` names the outside sequence (``"IDT"`` unless you say otherwise) and
+    ``n_codons`` is how many codons were compared, which is the shorter of the two
+    sequences. ``codon_matches`` and the ``codon_agreement`` property say how many of
+    those are identical, and ``codon_diffs`` lists the rest as ``(position, our codon,
+    their codon)``, position 1-based.
+
+    ``gc_ref`` and ``gc_other`` are the GC fraction of each sequence. ``mean_adapt_ref``
+    and ``mean_adapt_other`` are the mean relative codon adaptiveness in the spec's
+    species, where 1.0 would mean every codon is the most-used one for its residue.
+
+    ``enzyme_sites`` and ``motif_hits`` count what the pasted sequence carries of the
+    things the design avoids, the enzymes in ``spec.avoid_enzymes`` and the patterns in
+    ``spec.avoid_patterns``. Both count the pasted sequence only, since the reference was
+    optimized to have none. ``introduces_sites`` is True when any count is nonzero.
+
+    ``protein_match`` says whether the pasted sequence translates to the reference
+    protein, and ``protein_note`` says how it differs when it does not.
+    """
+
     label: str
     n_codons: int
     codon_matches: int
@@ -76,6 +98,27 @@ def _gc(seq: str) -> float:
 
 
 def compare_reference(library, other_dna: str, label: str = "IDT") -> ReferenceComparison:
+    """Cross-check an externally codon-optimized WT CDS against this library's frozen
+    reference, returning a ``ReferenceComparison``. ``Library.compare_reference`` calls
+    this.
+
+    ``other_dna`` can be raw DNA or a FASTA record; headers, whitespace, and anything
+    outside ACGT are stripped first. ``label`` is the name the report gives the outside
+    sequence. Raises if the library has not been codon-optimized, since there is no
+    reference to compare against, and raises if the pasted text holds no DNA.
+
+    Codons are compared position by position over the shorter of the two sequences, so
+    extra length on either side is ignored rather than shifting the frame. There is no
+    alignment step, so an insertion or deletion makes every codon after it read as a
+    difference.
+
+    The protein is checked on its own. The pasted sequence is translated only when its
+    length is a multiple of 3, and a mismatch is written into ``protein_note`` rather
+    than raised, so the rest of the report is still there to read. The note says which
+    kind of mismatch it is, a length that is not a multiple of 3, a protein of the wrong
+    length (usually the full protein where the truncated one was wanted), or one that
+    differs at some number of residues.
+    """
     if library.reference is None:
         raise ValueError("Library is not codon-optimized yet, call codon_optimize() first.")
     from dnachisel import translate

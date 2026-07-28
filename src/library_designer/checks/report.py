@@ -11,6 +11,12 @@ in isolation) catches a site that a variant's edge codon spells together with
 adjacent adaptor bases across the junction, which the old variable-only check
 missed. Translation round-trip is still checked on the variable region alone
 (adaptors are not coding).
+
+Two extra sets of checks switch on when the design says more about how it is built. A tiled
+library adds the per-oligo and per-tile-vector checks in ``checks/tiled.py``. A standard
+library that names a starting vector adds the adaptor-against-the-plasmid checks in
+``checks/vector.py``, which is the only place a construct that looks clean on its own can
+be caught not fitting the backbone it is meant to clone into.
 """
 from __future__ import annotations
 
@@ -26,6 +32,27 @@ from .translation import translates_to
 
 @dataclass
 class CheckReport:
+    """What QC found, one field per check. Printing it gives the readable report.
+
+    Most fields are lists of the variant names that failed a check, so an empty list is a
+    pass. ``assembly_checked``, ``assembly_correct``, and ``assembly_aligned`` are the
+    exception, being counts of members put through the simulation.
+
+    Which fields can fill in depends on the design. ``oligo_extra_sites``,
+    ``oligo_over_budget``, and ``unplaced`` come from a library that has been ``tile()``'d.
+    ``adaptor_issues`` comes from a standard library that names a starting vector.
+    ``overhang_issues`` and ``vector_extra_sites`` come from either of those two. The
+    assembly counts fill in whenever there is a destination vector to assemble into, tiled
+    or not. Optimization, translation, enzyme sites, motifs, and the length cap are checked
+    on every optimized library.
+
+    ``reference_advisories`` is informational and stays out of ``passed``. It reports what a
+    reference kept verbatim carries (a native BsaI site, an avoid-motif) rather than
+    treating it as a failure, because the user opted into that sequence. It comes from the
+    same two branches as ``overhang_issues``, so a library with neither tiles nor a starting
+    vector has no advisories to report.
+    """
+
     n_variants: int
     optimization_failed: list[str] = field(default_factory=list)
     translation_fail: list[str] = field(default_factory=list)
@@ -38,12 +65,30 @@ class CheckReport:
     overhang_issues: list[str] = field(default_factory=list)     # tiles with degenerate/palindromic overhangs
     unplaced: list[str] = field(default_factory=list)            # non-WT variants that landed in no tile
     vector_extra_sites: list[str] = field(default_factory=list)  # destination vector has enzyme sites beyond the 2 intended
+    # Adaptors vs the destination vector (empty unless spec.starting_vector is set on an
+    # untiled library): missing/ambiguous cut sites, or overhangs that will not ligate.
+    adaptor_issues: list[str] = field(default_factory=list)
+    # Assembly simulation (runs whenever there is a destination vector to assemble into):
+    # digest, ligate, and confirm the product is the plasmid carrying the intended variant.
+    assembly_issues: list[str] = field(default_factory=list)
+    assembly_checked: int = 0            # members put through the simulation
+    assembly_correct: int = 0            # members whose product carries their intended CDS
+    assembly_aligned: int = 0            # members whose product differs from the parent only
+                                         # at the intended codon
     # Informational only, does NOT fail the report: things kept verbatim from a chosen
     # reference (SD sites, motifs, a native BsaI) that the user opted into, not recoded.
     reference_advisories: list[str] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
+        """True when every failure list is empty and every simulated assembly rebuilt its
+        intended variant, which is ``assembly_correct == assembly_checked``.
+
+        With no assembly to simulate both counts are 0 and that clause holds.
+        ``reference_advisories`` does not affect the result, and neither does
+        ``assembly_aligned``, which is a stricter read on the same products and is reported
+        for information.
+        """
         return (
             not self.optimization_failed
             and not self.translation_fail
@@ -55,6 +100,9 @@ class CheckReport:
             and not self.overhang_issues
             and not self.unplaced
             and not self.vector_extra_sites
+            and not self.adaptor_issues
+            and not self.assembly_issues
+            and self.assembly_correct == self.assembly_checked
         )
 
     def __str__(self) -> str:
@@ -87,15 +135,47 @@ class CheckReport:
             ("tile overhang issue(s)", self.overhang_issues),
             ("unplaced variant(s)", self.unplaced),
             ("destination vector extra enzyme site(s)", self.vector_extra_sites),
+            ("adaptor/destination-vector issue(s)", self.adaptor_issues),
+            ("assembly issue(s)", self.assembly_issues),
         ):
             if hits:
                 lines.append(f"  {label}: {len(hits)}")
                 lines.append("    x " + ", ".join(hits[:5]))
+        if self.assembly_checked:
+            lines.append(
+                f"  assembly simulation: {self.assembly_correct}/{self.assembly_checked} "
+                "members rebuild their intended variant"
+            )
+            if self.assembly_aligned:
+                lines.append(
+                    f"  aligned to the parent vector: {self.assembly_aligned}/{self.assembly_checked} "
+                    "differ only at the intended codon"
+                )
         if self.reference_advisories:
             lines.append(f"  advisories (informational, not a failure): {len(self.reference_advisories)}")
             for msg in self.reference_advisories[:5]:
                 lines.append("    - " + msg)
         return "\n".join(lines)
+
+
+def verbatim_advisories(spec, reference: str) -> list[str]:
+    """What a reference the user chose to keep verbatim (``spec.cds`` or the plasmid's own
+    CDS) carries that we would otherwise have recoded away: restricted enzyme sites and
+    avoid-motifs. Informational, so both the tiled and the single-vector checks report
+    these rather than failing on them. The user opted into this sequence."""
+    out: list[str] = []
+    for e in spec.avoid_enzymes:
+        n = count_enzyme_sites(reference, e)
+        if n:
+            out.append(
+                f"reference carries {n} internal {e} site(s), kept verbatim "
+                "(a Golden Gate hazard; see the destination-vector check)"
+            )
+    for p in spec.avoid_patterns:
+        n = len(re.findall(p, reference))
+        if n:
+            out.append(f"reference carries {n} /{p}/ motif(s), kept verbatim (not recoded)")
+    return out
 
 
 def check_library(library) -> CheckReport:
@@ -165,4 +245,25 @@ def check_library(library) -> CheckReport:
         report.unplaced = t["unplaced"]
         report.vector_extra_sites = t["vector_extra_sites"]
         report.reference_advisories = t["reference_advisories"]
+    elif spec.vector is not None and getattr(library, "reference", None):
+        # A standard library cloned into a real plasmid: check the adaptors against it.
+        from .vector import check_vector
+
+        v = check_vector(library)
+        report.adaptor_issues = v["adaptor_issues"]
+        report.overhang_issues = v["overhang_issues"]
+        report.vector_extra_sites = v["vector_extra_sites"]
+        report.reference_advisories = v["advisories"]
+
+    # Then put the design together: digest, ligate, and align the product against the
+    # parent. Needs something to assemble into, so a library with no destination vector
+    # (tiled or a starting vector) is skipped.
+    if getattr(library, "tiles", None) is not None or spec.vector is not None:
+        from .assembly import check_assembly
+
+        a = check_assembly(library)
+        report.assembly_issues = a["assembly_issues"]
+        report.assembly_checked = a["assembly_checked"]
+        report.assembly_correct = a["assembly_correct"]
+        report.assembly_aligned = a["assembly_aligned"]
     return report

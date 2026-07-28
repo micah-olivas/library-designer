@@ -1,3 +1,6 @@
+"""The translation round-trip check, run on the variable region alone because the adaptors
+are not coding.
+"""
 from __future__ import annotations
 
 from dnachisel import translate

@@ -9,10 +9,8 @@ cannot self-ligate).
 """
 from __future__ import annotations
 
-import re
-
 from ..regions import reverse_complement
-from .motifs import ENZYME_SITES, count_enzyme_sites  # noqa: F401  (ENZYME_SITES kept for discoverability)
+from .motifs import ENZYME_SITES  # noqa: F401  (kept for discoverability)
 
 
 def check_tiled(library) -> dict:
@@ -53,7 +51,8 @@ def check_tiled(library) -> dict:
             overhang_issues.append(f"tile{t.index}")
 
     # Unplaced non-WT variants would signal a codon split across tile boundaries
-    # (codon-aligned tiling prevents this); the WT control is unplaced by design.
+    # (codon-aligned tiling prevents this). The global WT row is unplaced by design, it has
+    # no position; the per-tile WT_Tile_<i> controls are placed and checked like any oligo.
     unplaced = [n for n in getattr(library, "_unplaced", []) if n != "WT"]
 
     # Stray enzyme sites on the assembled destination vector (computed at tile time).
@@ -64,20 +63,11 @@ def check_tiled(library) -> dict:
     # Advisories: things kept verbatim from a chosen reference (SD sites, avoid-motifs,
     # a native BsaI). Informational, they do not fail the report, because the user opted
     # into this sequence rather than letting us recode it.
-    advisories: list[str] = []
-    verbatim = spec.cds is not None or (params is not None and params.use_vector_cds)
-    if verbatim and ref:
-        for e in spec.avoid_enzymes:
-            n = count_enzyme_sites(ref, e)
-            if n:
-                advisories.append(
-                    f"reference carries {n} internal {e} site(s), kept verbatim "
-                    "(a Golden Gate hazard; see the destination-vector check)"
-                )
-        for p in spec.avoid_patterns:
-            n = len(re.findall(p, ref))
-            if n:
-                advisories.append(f"reference carries {n} /{p}/ motif(s), kept verbatim (not recoded)")
+    from .report import verbatim_advisories
+
+    vec = spec.resolve_vector(params)
+    verbatim = spec.cds is not None or (vec is not None and vec.use_vector_cds)
+    advisories = verbatim_advisories(spec, ref) if verbatim and ref else []
 
     return {
         "oligo_extra_sites": extra,

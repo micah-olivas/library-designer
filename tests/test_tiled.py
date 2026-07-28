@@ -116,7 +116,8 @@ def test_single_tile_needs_no_cds_overhang():
 def test_gck_places_all_makeable_mutants(gck):
     mutants = int(gck.df["mut_index"].notna().sum())
     placed = int(gck.df["oligo"].map(lambda o: isinstance(o, str)).sum())
-    assert placed == mutants - len(gck.failed)            # every makeable mutant tiled
+    # Every makeable mutant is tiled, plus one WT control oligo per tile.
+    assert placed == mutants - len(gck.failed) + len(gck.tiles)
     assert [n for n in gck._unplaced if n != "WT"] == []  # nothing unplaced but the WT control
 
 
@@ -213,6 +214,83 @@ def test_qc_judges_the_params_used_not_the_spec_block():
     assert int(lib.df["oligo_length"].dropna().max()) > 200   # legitimately over spec.tiled
     assert not lib.check().oligo_over_budget                  # judged at the budget used
     assert lib.design_specs["tiled"]["params"]["oligo_budget"] == 1000
+
+
+# --- per-tile WT controls ------------------------------------------------------
+
+def test_one_wt_control_oligo_per_tile(gck):
+    """Each tile is amplified out of the pool and assembled on its own, so each one needs
+    its own unmutated member. The global ``WT`` row stays as the design record and rides on
+    no oligo."""
+    controls = [f"WT_Tile_{t.index}" for t in gck.tiles]
+    assert [n for n in gck.df["name"] if str(n).startswith("WT_Tile_")] == controls
+
+    wt = gck.df[gck.df["name"].isin(controls)]
+    assert list(wt["tile"]) == [t.index for t in gck.tiles]
+    assert all(isinstance(o, str) for o in wt["oligo"])
+    assert wt["mut_index"].isna().all()                       # no mutation to report
+    assert (wt["variable_dna"] == gck.reference).all()        # the whole frozen reference
+    assert gck.df.loc[gck.df["name"] == "WT", "oligo"].isna().all()
+
+
+def test_wt_control_oligo_carries_the_reference_window(gck):
+    """A control oligo is its tile's mutant oligo with the WT window in place: the same
+    primers, sites, and overhangs, so it amplifies and assembles with the rest of that
+    sublibrary."""
+    from library_designer.layout.tiled import assemble_oligo
+
+    for t in gck.tiles:
+        oligo = gck.df.loc[gck.df["name"] == f"WT_Tile_{t.index}", "oligo"].iloc[0]
+        assert oligo == assemble_oligo(gck.reference, gck.reference, t.start, t.end,
+                                       t.fwd, t.rev, gck.tiled_params)
+        assert oligo.startswith(t.fwd) and oligo.endswith(reverse_complement(t.rev))
+        assert not extra_sites(oligo, len(t.fwd), len(t.rev), "BsaI")
+        assert len(oligo) <= gck.tiled_params.oligo_budget
+
+
+def test_wt_controls_reach_the_pooled_order(gck, tmp_path):
+    out = tmp_path / "oligos.csv"
+    gck.to_oligo_pool(out)
+    pool = pd.read_csv(out)
+    assert {f"WT_Tile_{t.index}" for t in gck.tiles} <= set(pool["name"])
+    assert "WT" not in set(pool["name"])          # the global row has no oligo to order
+
+
+def test_wt_controls_can_be_switched_off():
+    spec = LibrarySpec(name="p", protein_sequence=SHORT_PROTEIN, substitutions=["A"],
+                       tiled=TiledAssemblyParams(oligo_budget=300, wt_controls=False))
+    lib = SubstitutionScan(spec).generate().codon_optimize().tile()
+    assert not [n for n in lib.df["name"] if str(n).startswith("WT_Tile_")]
+    assert lib.design_specs["tiled"]["wt_controls"] == []
+
+
+def test_retiling_rebuilds_the_controls_instead_of_stacking_them():
+    """A control belongs to one layout (a tile index and that tile's primers), so tiling
+    again replaces the set. Left in place they would be tiled a second time as if they were
+    variants, and the pool would grow a duplicate WT member per tile."""
+    spec = LibrarySpec(name="p", protein_sequence=SHORT_PROTEIN, substitutions=["A"],
+                       tiled=TiledAssemblyParams(oligo_budget=300))
+    lib = SubstitutionScan(spec).generate().codon_optimize().tile()
+    n_rows, first = len(lib.df), len(lib.tiles)
+
+    lib.tile(TiledAssemblyParams(oligo_budget=1000))          # fewer, longer tiles
+    controls = [n for n in lib.df["name"] if str(n).startswith("WT_Tile_")]
+    assert len(controls) == len(lib.tiles) < first
+    assert len(lib.df) == n_rows - first + len(lib.tiles)
+    assert not lib.df["name"].duplicated().any()
+
+
+def test_optimizing_again_drops_the_controls():
+    """New sequences mean a new layout, so the controls go with the oligos they carried."""
+    spec = LibrarySpec(name="p", protein_sequence=SHORT_PROTEIN, substitutions=["A"],
+                       tiled=TiledAssemblyParams(oligo_budget=300))
+    lib = SubstitutionScan(spec).generate().codon_optimize().tile()
+    assert [n for n in lib.df["name"] if str(n).startswith("WT_Tile_")]
+
+    lib.codon_optimize()
+    assert not [n for n in lib.df["name"] if str(n).startswith("WT_Tile_")]
+    assert "oligo" not in lib.df.columns
+    assert lib.df["variable_dna"].notna().any()                # rows still line up
 
 
 def test_primer_set_longer_than_primer_length_refused(tmp_path):

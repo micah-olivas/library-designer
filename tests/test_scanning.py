@@ -134,6 +134,77 @@ def test_vendor_pooled_schema(mbo038, tmp_path):
     assert (out["Insert Length"] == out["Insert Sequence"].str.len()).all()
 
 
+# --- run directories / provenance ---------------------------------------------
+
+_RUN_DIR = re.compile(r"^hAcyP1_\d{8}_\d{6}$")
+
+
+def test_export_all_writes_a_dated_run_directory(mbo038, tmp_path):
+    """Files land in their own dated directory, and the directory, the record inside it,
+    and the library all name the same run."""
+    import json
+
+    mbo038.export_all(tmp_path / "out", plots=False)
+
+    (run,) = list((tmp_path / "out").iterdir())
+    assert _RUN_DIR.match(run.name)
+    assert mbo038.output_dir == run
+    assert {p.name for p in run.iterdir()} == {
+        "variants.csv", "hAcyP1_full_library.csv", "hAcyP1_order.csv",
+        "hAcyP1_design_specs.json",
+    }
+    specs = json.loads((run / "hAcyP1_design_specs.json").read_text())
+    assert specs["output_dir"] == str(run)
+    # The directory stamp is the moment the sequences were built, not the moment they were
+    # written, so the name and the record agree.
+    assert specs["created"] == mbo038.created
+    assert run.name.endswith(mbo038.created[:19].replace("-", "").replace(":", "").replace("T", "_"))
+
+
+def test_re_exporting_refreshes_one_directory(mbo038, tmp_path):
+    mbo038.export_all(tmp_path / "out", plots=False)
+    mbo038.export_all(tmp_path / "out", plots=False)
+    assert len(list((tmp_path / "out").iterdir())) == 1
+
+
+def test_a_later_run_gets_its_own_directory(mbo038, tmp_path):
+    """Two runs must not share a directory, which is the whole point of the stamp."""
+    from datetime import timedelta
+
+    mbo038.export_all(tmp_path / "out", plots=False)
+    first = mbo038.output_dir
+    mbo038._created_at += timedelta(hours=1)          # stand in for a later run
+    mbo038.export_all(tmp_path / "out", plots=False)
+    assert mbo038.output_dir != first
+    assert sorted(p.name for p in (tmp_path / "out").iterdir()) == sorted(
+        [first.name, mbo038.output_dir.name]
+    )
+    mbo038._created_at -= timedelta(hours=1)          # leave the module fixture as found
+
+
+def test_timestamp_false_writes_straight_into_the_named_directory(mbo038, tmp_path):
+    mbo038.export_all(tmp_path / "flat", plots=False, timestamp=False)
+    assert (tmp_path / "flat" / "variants.csv").is_file()
+    assert mbo038.output_dir == tmp_path / "flat"
+
+
+def test_export_before_optimizing_leaves_no_directory_behind(tmp_path):
+    """The guard exists so a library that isn't ready cannot litter an empty run dir."""
+    spec = LibrarySpec(name="early", protein_sequence="MKAILVDE", substitutions=["A"])
+    lib = SubstitutionScan(spec).generate()
+    with pytest.raises(ValueError, match="not codon-optimized"):
+        lib.export_all(tmp_path / "out")
+    assert not (tmp_path / "out").exists()
+
+
+def test_run_dir_is_shared_by_the_piecemeal_exporters(mbo038, tmp_path):
+    out = mbo038.run_dir(tmp_path / "out")
+    assert out.is_dir() and _RUN_DIR.match(out.name)
+    mbo038.to_usortm(out / "variants.csv")
+    assert out == mbo038.run_dir(tmp_path / "out")     # same run, same directory
+    assert (out / "variants.csv").is_file()
+
+
 # --- determinism --------------------------------------------------------------
 
 def test_codon_optimization_is_deterministic_given_seed():
@@ -262,3 +333,122 @@ def test_same_spec_reproduces_in_a_fresh_process():
         runs.append(proc.stdout.strip())
     assert runs[0] == runs[1]
     assert runs[0] == SubstitutionScan(_det_spec()).generate().codon_optimize().reference
+
+
+# --- finding a library's own runs ---------------------------------------------
+
+def test_a_library_finds_its_own_runs(mbo038, tmp_path):
+    """The library knows its name, so nothing about a run has to be typed except which one."""
+    from datetime import timedelta
+
+    out = tmp_path / "out"
+    mbo038.export_all(out, plots=False)
+    first = mbo038.output_dir
+    mbo038._created_at += timedelta(days=1)
+    mbo038.export_all(out, plots=False)
+    second = mbo038.output_dir
+    (out / "someone_elses_library_20260101_000000").mkdir()
+    (out / "notes").mkdir()
+
+    assert mbo038.runs(out) == [first, second]          # only this library's, oldest first
+    assert mbo038.latest_run(out) == second
+    assert mbo038.run(first.name.split("_")[-2], out) == first     # by date alone
+    mbo038._created_at -= timedelta(days=1)
+
+
+def test_naming_a_run_that_is_not_there_lists_the_ones_that_are(mbo038, tmp_path):
+    out = tmp_path / "out"
+    mbo038.export_all(out, plots=False)
+    stamp = mbo038.output_dir.name.split("hAcyP1_")[-1]
+
+    with pytest.raises(FileNotFoundError, match=f"available: \\['{stamp}'\\]"):
+        mbo038.run("19990101_000000", out)
+    assert mbo038.latest_run(tmp_path / "nowhere") is None
+    assert mbo038.runs(tmp_path / "nowhere") == []
+
+
+def test_a_run_record_is_read_back_without_rebuilding_its_filename(mbo038, tmp_path):
+    mbo038.export_all(tmp_path / "out", plots=False)
+    run = mbo038.latest_run(tmp_path / "out")
+
+    record = mbo038.run_record(run)
+    assert record["reference_cds"] == mbo038.reference
+    assert mbo038.matches_run(run)
+
+    with pytest.raises(FileNotFoundError, match="No design-specs record"):
+        mbo038.run_record(tmp_path)
+
+
+def test_matches_run_says_no_when_the_design_has_moved_on(mbo038, tmp_path):
+    """The guard before adding files to a directory somebody already ordered from."""
+    mbo038.export_all(tmp_path / "out", plots=False)
+    run = mbo038.latest_run(tmp_path / "out")
+    assert mbo038.matches_run(run)
+
+    other = SubstitutionScan(
+        LibrarySpec(name="hAcyP1", protein_sequence="MKAILVDEQTRW", substitutions=["A"])
+    ).generate().codon_optimize()
+    assert not other.matches_run(run)                   # same name, different design
+
+
+def test_exporters_default_to_the_libraries_own_run_directory(tmp_path, monkeypatch):
+    import sys
+
+    sys.path.insert(0, "tests")
+    from test_vectors import CLEAN_CDS, _plasmid, _standard_lib, A5_BACKBONE, A3_BACKBONE
+
+    monkeypatch.chdir(tmp_path)
+    lib = _standard_lib(_plasmid(tmp_path, CLEAN_CDS), A5_BACKBONE, A3_BACKBONE)
+    lib.to_assembled_vectors()                          # no path given
+    lib.to_vector_maps()
+
+    run = lib.latest_run()
+    assert run is not None
+    assert (run / "assembled_vectors" / "parent_WT.gb").is_file()
+    assert (run / "vector" / "destination.gb").is_file()
+
+
+def test_the_handoff_carries_the_run_identity_for_downstream_tools(mbo038, tmp_path):
+    """uSort-M reads variants.csv plus the record beside it. The CSV stays exactly
+    name,sequence because uSort-M parses it strictly, so the run identity travels in the
+    record, along with a digest tying the two together."""
+    import hashlib
+    import json
+
+    mbo038.export_all(tmp_path / "out", plots=False)
+    run = mbo038.output_dir
+    record = json.loads((run / "hAcyP1_design_specs.json").read_text())
+
+    assert mbo038.run_id == run.name                    # one token, and it names the folder
+    assert record["run_id"] == mbo038.run_id
+    assert record["created"] == mbo038.created
+
+    handoff = record["handoff"]
+    assert handoff["run_id"] == mbo038.run_id
+    assert handoff["variants_csv"] == "variants.csv"
+    assert handoff["n_variants"] == len(mbo038)
+    csv = (run / "variants.csv").read_bytes()
+    assert handoff["sha256"] == hashlib.sha256(csv).hexdigest()
+    # The contract itself is untouched: two columns, nothing prepended.
+    assert csv.split(b"\n")[0] == b"name,sequence"
+
+
+def test_the_run_identity_changes_with_the_run_and_not_with_the_export(mbo038, tmp_path):
+    from datetime import timedelta
+
+    first = mbo038.run_id
+    mbo038.export_all(tmp_path / "a", plots=False)
+    mbo038.export_all(tmp_path / "b", plots=False)
+    assert mbo038.run_id == first                       # re-exporting is the same run
+
+    mbo038._created_at += timedelta(hours=1)
+    assert mbo038.run_id != first                       # a later build is a different one
+    mbo038._created_at -= timedelta(hours=1)
+
+
+def test_a_stale_handoff_record_does_not_survive_re_optimizing():
+    spec = LibrarySpec(name="h", protein_sequence="MKAILVDEQTRW", substitutions=["A"])
+    lib = SubstitutionScan(spec).generate().codon_optimize()
+    lib.design_specs["handoff"] = {"run_id": "from the last run"}
+    lib.codon_optimize()
+    assert "handoff" not in lib.design_specs

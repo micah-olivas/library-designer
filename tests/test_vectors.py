@@ -17,12 +17,19 @@ from library_designer.checks.motifs import contains_enzyme_site, count_enzyme_si
 from library_designer.checks.translation import translates_to
 from library_designer.layout.vector_io import (
     assemble_vector,
+    insert_offset,
     locate_insert,
     read_vector_file,
     resolve_destination,
     terminal_contexts,
 )
 from library_designer.regions import reverse_complement
+
+
+def _is_rotation(a: str, b: str) -> bool:
+    """True if ``a`` is ``b`` read from a different origin, the only freedom an emitted
+    circular map has."""
+    return len(a) == len(b) and a in b + b
 
 # A clean, in-frame CDS (no BsaI site, no Shine-Dalgarno motif) and two "dirty" variants.
 _SAFE = ["GCT", "AAA", "CTG", "GAT", "ACC", "TTT", "CAA", "GTT", "AAT", "CCA"]
@@ -136,9 +143,10 @@ def test_terminal_contexts_and_assemble_circular(tmp_path):
     dest = resolve_destination(path, search_cds=CLEAN_CDS)
     t5, t3 = terminal_contexts(dest, 4)
     assert t5 == BB5[-4:] and t3 == BB3[:4]           # overhangs are the flanking bases
-    # Dropping the CDS back in reproduces the original plasmid (rotated to CDS origin).
+    # Dropping the CDS back in reproduces the original plasmid, read from the chosen origin.
     rebuilt = assemble_vector(dest, CLEAN_CDS)
-    assert rebuilt == CLEAN_CDS + BB3 + BB5
+    assert _is_rotation(rebuilt, BB5 + CLEAN_CDS + BB3)
+    assert rebuilt[insert_offset(dest):][:len(CLEAN_CDS)] == CLEAN_CDS
 
 
 def test_tile_params_carrying_a_starting_vector_without_a_spec_block(tmp_path):
@@ -306,6 +314,335 @@ def test_gb_end_to_end_and_maps(tmp_path):
     assert any("msGFP2" in x for x in labels)          # a carried-over backbone feature
 
 
+# --- standard (untiled) destination vector ------------------------------------
+#
+# One oligo carries the whole CDS, so the library needs one destination vector. Where its
+# drop-out starts and ends follows from the adaptors, and both conventions in the wild are
+# covered: the adaptor spelling the backbone-derived overhang, and the adaptor stopping at
+# the site plus spacer so the overhang is the CDS's own first/last four bases.
+
+A5_BACKBONE = "GGCGC" + "GGTCTC" + "A" + BB5[-4:]        # ...site, spacer, backbone overhang
+A3_BACKBONE = BB3[:4] + "T" + reverse_complement("GGTCTC") + "GCGCC"
+A5_CDS = "ggcgcGGTCTCC"                                   # ...site, spacer, then the CDS
+A3_CDS = "C" + reverse_complement("GGTCTC") + "cggcg"
+
+
+def _standard_lib(path, a5, a3, *, cds=CLEAN_CDS, protein=None, **vector_kw):
+    from library_designer import StartingVectorParams
+
+    spec = LibrarySpec(
+        name="syn", protein_sequence=protein or _protein(cds), cds=cds,
+        substitutions=["A"], adaptor_5=a5, adaptor_3=a3,
+        starting_vector=StartingVectorParams(path=path, insert_label="insert", **vector_kw),
+    )
+    return SubstitutionScan(spec).generate().codon_optimize()
+
+
+def _overhang_blocked(rep) -> list[str]:
+    """Members the simulation says cannot ligate because their codon sits in a fused
+    overhang, which is the price of drawing the overhang from the CDS ends."""
+    return [m for m in rep.assembly_issues if "fused overhang" in m]
+
+
+def _rebuilt(lib):
+    """The plasmid the library's oligos should rebuild, in the emitted vector's frame:
+    the starting plasmid with the frozen reference in place."""
+    return assemble_vector(lib.destination_vector().dest, lib.reference)
+
+
+def _clone(lib):
+    """Simulate the assembly: digest the oligo, digest the vector, ligate. Returns the
+    finished plasmid, or None when the two fused overhangs do not anneal."""
+    dv = lib.destination_vector()
+    spec, cut = lib.spec, dv.cut
+    construct = (spec.adaptor_5 + lib.reference + spec.adaptor_3).upper()
+    frag = construct[cut.cut_5:cut.cut_3]
+    o5, o3 = len(cut.overhang_5), len(cut.overhang_3)
+    if frag[:o5] != dv.overhang_5 or frag[len(frag) - o3:] != dv.overhang_3:
+        return None
+    stuffer = spec.vector.vector_insert.upper()
+    i = dv.sequence.index(stuffer)
+    return dv.sequence[:i] + frag[o5:len(frag) - o3] + dv.sequence[i + len(stuffer):]
+
+
+def test_starting_vector_accepts_a_bare_path(tmp_path):
+    """The ergonomic form: spec.starting_vector = "plasmid.gb", normalized to params."""
+    path = _plasmid(tmp_path, CLEAN_CDS)
+    spec = LibrarySpec(name="syn", protein_sequence=_protein(CLEAN_CDS), starting_vector=path)
+    assert spec.vector.path == path
+    assert spec.vector.enzyme == "BsaI" and not spec.vector.use_vector_cds
+    assert LibrarySpec(name="syn", protein_sequence="MKV").vector is None
+
+
+def test_starting_vector_from_toml(tmp_path):
+    """Both TOML forms: ``starting_vector = "p.gb"`` and a ``[starting_vector]`` table."""
+    path = _plasmid(tmp_path, CLEAN_CDS)
+    head = f'name = "s"\nprotein_sequence = "{_protein(CLEAN_CDS)}"\nsubstitutions = ["A"]\n'
+    (tmp_path / "bare.toml").write_text(head + f'starting_vector = "{path}"\n')
+    (tmp_path / "table.toml").write_text(
+        head + f'\n[starting_vector]\npath = "{path}"\ninsert_label = "insert"\n'
+        'use_vector_cds = true\ninsert_anchors = ["ACAG", "TGAC"]\n'
+    )
+    bare = LibrarySpec.from_toml(tmp_path / "bare.toml").vector
+    assert (bare.path, bare.use_vector_cds) == (path, False)
+
+    table = LibrarySpec.from_toml(tmp_path / "table.toml").vector
+    assert table.insert_label == "insert" and table.use_vector_cds
+    assert table.insert_anchors == ("ACAG", "TGAC")      # a TOML list, kept as a tuple
+
+
+def test_backbone_overhang_convention_drops_the_whole_cds(tmp_path):
+    lib = _standard_lib(_plasmid(tmp_path, CLEAN_CDS), A5_BACKBONE, A3_BACKBONE)
+    dv = lib.destination_vector()
+
+    assert (dv.start, dv.end) == (0, len(lib.reference))       # nothing of the CDS is kept
+    assert (dv.overhang_5, dv.overhang_3) == (BB5[-4:], BB3[:4])
+    assert dv.cut.keep_5 == dv.cut.keep_3 == 4                 # the adaptors spell the overhangs
+    assert lib.check().passed
+    # Ligating the digested oligo back in rebuilds the starting plasmid exactly.
+    assert _clone(lib) == _rebuilt(lib)
+    assert _is_rotation(_rebuilt(lib), BB5 + CLEAN_CDS + BB3)
+
+
+def test_cds_overhang_convention_keeps_four_bases_of_the_cds(tmp_path):
+    """The MBO-038 convention: the adaptor stops after the site and its spacer, so the
+    fused overhang is the CDS's own end and the vector has to keep those four bases."""
+    lib = _standard_lib(_plasmid(tmp_path, CLEAN_CDS), A5_CDS, A3_CDS)
+    dv = lib.destination_vector()
+
+    assert (dv.start, dv.end) == (4, len(lib.reference) - 4)
+    assert (dv.overhang_5, dv.overhang_3) == (CLEAN_CDS[:4], CLEAN_CDS[-4:])
+    assert dv.cut.keep_5 == dv.cut.keep_3 == 0
+    kept = dv.sequence[insert_offset(dv.dest):]
+    assert kept.startswith(CLEAN_CDS[:4] + "AGAGACC")          # kept arm, then the drop-out
+    rep = lib.check()
+    # The price of this convention: the three variants whose codons sit in an overhang
+    # cannot ligate. Nothing else is wrong.
+    assert rep.assembly_issues == _overhang_blocked(rep)
+    assert rep.assembly_correct == rep.assembly_checked - 3
+    assert not (rep.adaptor_issues or rep.overhang_issues or rep.vector_extra_sites)
+    assert _clone(lib) == _rebuilt(lib)
+    assert _is_rotation(_rebuilt(lib), BB5 + CLEAN_CDS + BB3)
+
+
+def test_linear_backbone_splices_in_place(tmp_path):
+    lib = _standard_lib(_plasmid(tmp_path, CLEAN_CDS, topology="linear"), A5_CDS, A3_CDS)
+    dv = lib.destination_vector()
+    assert dv.topology == "linear"
+    assert _clone(lib) == BB5 + CLEAN_CDS + BB3
+
+
+def test_codon_optimized_reference_arms_come_from_the_reference(tmp_path):
+    """With no spec.cds the reference is codon-optimized, so it differs from the CDS the
+    plasmid holds. The kept arms and overhangs must follow the reference, not the plasmid,
+    or the oligos would not anneal."""
+    lib = _standard_lib(_plasmid(tmp_path, CLEAN_CDS), A5_CDS, A3_CDS,
+                        cds=None, protein=_protein(CLEAN_CDS))
+    dv = lib.destination_vector()
+    assert lib.reference != CLEAN_CDS
+    assert dv.overhang_5 == lib.reference[:4] and dv.overhang_3 == lib.reference[-4:]
+    rep = lib.check()
+    assert rep.assembly_issues == _overhang_blocked(rep)       # only the terminal codons
+    assert _clone(lib) == _rebuilt(lib)
+    assert _is_rotation(_rebuilt(lib), BB5 + lib.reference + BB3)
+
+
+def test_missing_cut_site_in_an_adaptor_is_reported(tmp_path):
+    """The 3' adaptor shipped with the MBO-038 example spells the reverse of the BsaI site
+    rather than its reverse complement, so nothing cuts that end."""
+    lib = _standard_lib(_plasmid(tmp_path, CLEAN_CDS), A5_CDS, "CCTCTGGcggcg")
+    rep = lib.check()
+    assert not rep.passed
+    assert any("adaptor_3" in m and "no reverse-strand BsaI site" in m for m in rep.adaptor_issues)
+
+
+def test_overhang_that_will_not_ligate_is_reported(tmp_path):
+    """Four adaptor bases that are not the backbone bases flanking the insert. The construct
+    itself is fine, so only a check against the plasmid can catch this."""
+    lib = _standard_lib(_plasmid(tmp_path, CLEAN_CDS),
+                        "GGCGC" + "GGTCTC" + "A" + "TTTT", A3_BACKBONE)
+    rep = lib.check()
+    assert not rep.passed
+    assert any("TTTT" in m and BB5[-4:] in m for m in rep.adaptor_issues)
+    assert _clone(lib) is None                       # the overhangs do not anneal
+
+
+def test_cut_falling_inside_the_coding_region_is_reported(tmp_path):
+    # The site sits one base too close to the variable region, so the cut would shave the
+    # first base off the CDS.
+    lib = _standard_lib(_plasmid(tmp_path, CLEAN_CDS), "GGCGCGGTCTC", A3_CDS)
+    rep = lib.check()
+    assert not rep.passed
+    assert any("inside the coding region" in m for m in rep.adaptor_issues)
+
+
+def test_no_adaptors_is_an_advisory_not_a_failure(tmp_path):
+    """A pool with no cloning flanks still gets a destination vector (whole CDS dropped
+    out, overhangs from the backbone), and QC says so without failing the design."""
+    lib = _standard_lib(_plasmid(tmp_path, CLEAN_CDS), "", "")
+    rep = lib.check()
+    assert rep.passed and not rep.adaptor_issues
+    assert any("no adaptors are set" in a for a in rep.reference_advisories)
+    dv = lib.destination_vector()
+    assert dv.cut is None and (dv.start, dv.end) == (0, len(lib.reference))
+
+
+def test_backbone_bsai_is_reported_on_a_standard_vector(tmp_path):
+    path = _write_gb(tmp_path / "dirty.gb", BB5 + CLEAN_CDS + "GGTCTCTT" + BB3,
+                     features=[("CDS", len(BB5), len(BB5) + len(CLEAN_CDS), 1, "insert")])
+    rep = _standard_lib(path, A5_CDS, A3_CDS).check()
+    assert rep.vector_extra_sites and not rep.passed
+
+
+def test_use_vector_cds_without_tiling(tmp_path):
+    """Freeze the plasmid's own CDS as the reference for a plain scan, no tiling involved."""
+    lib = _standard_lib(_plasmid(tmp_path, CLEAN_CDS), A5_CDS, A3_CDS,
+                        cds=None, protein=_protein(CLEAN_CDS), use_vector_cds=True)
+    assert lib.reference == CLEAN_CDS
+    rep = lib.check()
+    assert rep.assembly_issues == _overhang_blocked(rep)       # only the terminal codons
+    assert _clone(lib) == _rebuilt(lib)
+
+
+def test_spec_level_vector_feeds_a_tiled_layout(tmp_path):
+    """A [tiled] block with no backbone of its own picks up spec.starting_vector, so the
+    plasmid is declared once wherever the library is laid out."""
+    path = _plasmid(tmp_path, CLEAN_CDS)
+    spec = LibrarySpec(name="syn", protein_sequence=_protein(CLEAN_CDS), cds=CLEAN_CDS,
+                       substitutions=["A"], starting_vector=path,
+                       tiled=TiledAssemblyParams(oligo_budget=150))
+    lib = SubstitutionScan(spec).generate().codon_optimize().tile()
+
+    assert lib.tiled_params.starting_vector == path      # resolved onto the layout
+    assert len(lib.tiles) >= 2 and all(t.topology == "circular" for t in lib.tiles)
+    checked, ok = _reconstitution(lib)
+    assert checked and ok == checked
+
+
+def test_standard_exports_one_vector_and_one_map(tmp_path):
+    import pandas as pd
+
+    lib = _standard_lib(_plasmid(tmp_path, CLEAN_CDS, extra_feature=("rep_origin", 0, 12, 1, "ori")),
+                        A5_CDS, A3_CDS)
+    dv = lib.destination_vector()
+
+    lib.to_vectors(tmp_path / "vectors.csv")
+    rows = pd.read_csv(tmp_path / "vectors.csv")
+    assert len(rows) == 1
+    assert rows.loc[0, "vector_sequence"] == dv.sequence
+    assert (rows.loc[0, "overhang_5"], rows.loc[0, "overhang_3"]) == (dv.overhang_5, dv.overhang_3)
+    assert (rows.loc[0, "cds_dropout_start"], rows.loc[0, "cds_dropout_end"]) == (dv.start, dv.end)
+    assert rows.loc[0, "origin_in_starting_vector"] == dv.dest.origin + 1
+
+    outdir = tmp_path / "maps"
+    lib.to_vector_maps(outdir)
+    assert not list(outdir.glob("tile*_destination.gb"))
+    manifest = pd.read_csv(outdir / "destination_vectors.csv")
+    assert len(manifest) == 1 and manifest.loc[0, "file"] == "destination.gb"
+
+    from Bio import SeqIO
+    rec = SeqIO.read(str(outdir / "destination.gb"), "genbank")
+    assert str(rec.seq) == dv.sequence
+    assert rec.annotations["topology"] == "circular"
+    labels = [(f.qualifiers.get("label") or [""])[0] for f in rec.features]
+    assert any("drop-out" in x for x in labels)
+    assert "ori" in labels                               # backbone feature carried over
+
+
+def test_to_vectors_needs_a_starting_vector(tmp_path):
+    spec = LibrarySpec(name="syn", protein_sequence=_protein(CLEAN_CDS), cds=CLEAN_CDS,
+                       substitutions=["A"])
+    lib = SubstitutionScan(spec).generate().codon_optimize()
+    with pytest.raises(ValueError, match="starting_vector"):
+        lib.to_vectors(tmp_path / "vectors.csv")
+    with pytest.raises(ValueError, match="starting_vector"):
+        lib.to_vector_maps(tmp_path / "maps")
+
+
+# --- where the emitted map starts ---------------------------------------------
+#
+# A viewer draws a plasmid from base 1, so whatever sits at the origin is split across the
+# two ends of the map. Reading from the insert put the Golden Gate sites there, which is
+# the part you want to look at, so the origin goes upstream of the promoter.
+
+ORI = "".join("ACGTTGCA"[i % 8] for i in range(200))
+PROM = "TTGACAATTAATCATCGGCTCGTATAATGTGTGGA"          # 35 bp, a trc-like promoter
+LEADER = "GGCATTACGTACGTACGTACGTACGTACGT"             # 30 bp between promoter and CDS
+TERM = "AACCCGCTGATCGGCACGTAAGAGGTTCC"                # 29 bp, ends at the plasmid's last base
+
+
+def _cassette_plasmid(tmp_path, *, gap: int = 60, name="cassette.gb"):
+    """A plasmid laid out like a real expression construct: origin of replication, a gap,
+    a promoter, a leader, the insert, a terminator running to the last base. ``gap`` sets
+    how much room there is upstream of the promoter."""
+    spacer = "A" * gap
+    seq = ORI + spacer + PROM + LEADER + CLEAN_CDS + TERM
+    p5 = len(ORI) + gap
+    c5 = p5 + len(PROM) + len(LEADER)
+    feats = [
+        ("rep_origin", 0, len(ORI), 1, "ori"),
+        ("promoter", p5, p5 + len(PROM), 1, "trc promoter"),
+        ("CDS", c5, c5 + len(CLEAN_CDS), 1, "insert"),
+        ("terminator", c5 + len(CLEAN_CDS), len(seq), 1, "rrnB T1"),
+    ]
+    return _write_gb(tmp_path / name, seq, features=feats), p5, c5
+
+
+def test_origin_sits_upstream_of_the_promoter(tmp_path):
+    path, prom_start, cds_start = _cassette_plasmid(tmp_path)
+    dest = resolve_destination(path, search_cds=CLEAN_CDS)
+
+    assert dest.origin == prom_start - 50          # 50 bp of room before the promoter
+    assert insert_offset(dest) == cds_start - dest.origin
+    # The promoter and the insert follow the origin in reading order, both intact.
+    rebuilt = assemble_vector(dest, CLEAN_CDS)
+    assert rebuilt.index(PROM) < rebuilt.index(CLEAN_CDS)
+
+
+def test_origin_is_nudged_off_a_feature_it_would_cut(tmp_path):
+    """Backing off 50 bp can land inside an upstream annotation. A feature spanning the
+    origin cannot be written to GenBank at all, so the origin moves to its edge instead."""
+    path, prom_start, _ = _cassette_plasmid(tmp_path, gap=20, name="tight.gb")
+    dest = resolve_destination(path, search_cds=CLEAN_CDS)
+
+    assert prom_start - 50 < len(ORI)              # the plain 50 bp back-off would cut the ori
+    assert dest.origin == 0                        # so it settles on that feature's edge
+    assert dest.origin != dest.start               # and still not on the insert
+
+
+def test_a_linear_backbone_is_never_rotated(tmp_path):
+    path, _, cds_start = _cassette_plasmid(tmp_path, name="linear.gb")
+    dest = resolve_destination(path, topology_override="linear", search_cds=CLEAN_CDS)
+    assert dest.origin == dest.start == cds_start
+    assert assemble_vector(dest, CLEAN_CDS) == dest.full_seq
+
+
+def test_map_keeps_every_backbone_feature_and_records_the_rotation(tmp_path):
+    """The emitted map is rotated against the file the user gave us, so the manifest says
+    which base it starts at. Every backbone feature survives the remap, including one that
+    ends on the plasmid's very last base."""
+    import pandas as pd
+
+    path, _, _ = _cassette_plasmid(tmp_path)
+    lib = _standard_lib(path, A5_CDS, A3_CDS)
+    dv = lib.destination_vector()
+    lib.to_vector_maps(tmp_path / "maps")
+
+    manifest = pd.read_csv(tmp_path / "maps" / "destination_vectors.csv")
+    assert manifest.loc[0, "origin_in_starting_vector"] == dv.dest.origin + 1
+    assert manifest.loc[0, "features_carried"] == 3          # ori, promoter, terminator
+
+    from Bio import SeqIO
+    rec = SeqIO.read(str(tmp_path / "maps" / "destination.gb"), "genbank")
+    labels = [(f.qualifiers.get("label") or [""])[0] for f in rec.features]
+    assert {"ori", "trc promoter", "rrnB T1"} <= set(labels)
+    # The drop-out and its enzyme sites sit inside the map, not across its ends.
+    sites = [i for i in range(len(rec.seq) - 5)
+             if str(rec.seq)[i:i + 6] in ("GGTCTC", reverse_complement("GGTCTC"))]
+    assert len(sites) == 2
+    assert all(20 < i < len(rec.seq) - 20 for i in sites)
+
+
 def test_edited_plasmid_file_is_read_again_not_served_from_cache(tmp_path):
     """resolve_destination caches per path, so an edited plasmid used to come back
     stale for the rest of the session (a notebook re-running a cell)."""
@@ -320,3 +657,49 @@ def test_edited_plasmid_file_is_read_again_not_served_from_cache(tmp_path):
     assert again.located_region == other
     # and the cache still serves an unchanged file without re-reading
     assert resolve_destination(str(path), search_cds=other) is again
+
+
+# --- what the destination vector says about itself ----------------------------
+
+def test_the_destination_vector_prints_a_readable_summary(tmp_path):
+    """Evaluating it in a notebook should say everything the design turns on, without the
+    caller reaching into dv.dest and dv.cut to print it themselves."""
+    lib = _standard_lib(_plasmid(tmp_path, CLEAN_CDS), A5_BACKBONE, A3_BACKBONE)
+    dv = lib.destination_vector()
+    text = str(dv)
+
+    assert repr(dv) == text                                   # same in a cell and in print()
+    html = dv._repr_html_()                                   # escaped, so 5' becomes 5&#x27;
+    assert html.startswith("<pre") and "Destination vector for p.gb" in html
+    assert "p.gb" in text.splitlines()[0]                     # named after the plasmid file
+    assert f"{len(dv.dest.full_seq)} bp circular" in text
+    assert f"{dv.dest.start}-{dv.dest.end}" in text
+    assert f"{dv.start}-{dv.end} of the {len(lib.reference)} bp" in text
+    assert f"5' {dv.overhang_5}   3' {dv.overhang_3}" in text
+    assert "(match)" in text and dv.overhangs_match
+    assert f"{dv.cut.keep_5} at the 5' end" in text
+    assert f"{dv.length} bp, read from base {dv.dest.origin + 1}" in text
+
+
+def test_the_summary_calls_out_overhangs_that_will_not_ligate(tmp_path):
+    lib = _standard_lib(_plasmid(tmp_path, CLEAN_CDS), "GGCGC" + "GGTCTC" + "A" + "TTTT",
+                        A3_BACKBONE)
+    dv = lib.destination_vector()
+    assert dv.overhangs_match is False
+    assert "MISMATCH, nothing will ligate" in str(dv)
+
+
+def test_the_summary_survives_adaptors_with_no_cut_site(tmp_path):
+    """dv.cut is None here, so anything reaching for dv.cut.overhang_5 would raise."""
+    dv = _standard_lib(_plasmid(tmp_path, CLEAN_CDS), "", "").destination_vector()
+    assert dv.overhangs_match is None
+    text = str(dv)
+    assert "the adaptors carry no cut site" in text
+    assert "adaptor bases kept" not in text
+    assert sum(line.strip().startswith("!") for line in text.splitlines()) == 2
+
+
+def test_the_summary_flags_a_minus_strand_insert(tmp_path):
+    lib = _standard_lib(_plasmid(tmp_path, CLEAN_CDS, reverse=True),
+                        "GGCGC" + "GGTCTC" + "A" + BB5[-4:], A3_BACKBONE)
+    assert "insert on the minus strand" in str(lib.destination_vector())

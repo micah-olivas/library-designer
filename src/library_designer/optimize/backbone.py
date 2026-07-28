@@ -46,8 +46,8 @@ def _cds_from_vector(spec: LibrarySpec) -> str:
     """Extract the CDS already sitting in the starting vector, to freeze verbatim.
 
     This is the "clone the destination vectors straight from my vector" path: the
-    reference *is* the vector's CDS, whatever codon optimization it carries, so the
-    per-tile vectors are just the starting vector with one window dropped out. The
+    reference *is* the vector's CDS, whatever codon optimization it carries, so a
+    destination vector is just the starting vector with one window dropped out. The
     located region must be in-frame and encode the protein (otherwise the locus is
     wrong), but its SD sites, motifs, and even internal BsaI are kept, not recoded.
     They are surfaced as advisories by QC (see checks/tiled.py); an internal BsaI is
@@ -56,7 +56,7 @@ def _cds_from_vector(spec: LibrarySpec) -> str:
     """
     from ..layout.vector_io import locating_kwargs, resolve_destination
 
-    dest = resolve_destination(spec.tiled.starting_vector, **locating_kwargs(spec))
+    dest = resolve_destination(spec.vector.path, **locating_kwargs(spec))
     return dest.located_region
 
 
@@ -64,7 +64,7 @@ def build_reference(spec: LibrarySpec, seed: int | None = None) -> str:
     """The frozen WT CDS every variant is stamped onto.
 
     Three sources, in order: the CDS already in the starting vector when
-    ``tiled.use_vector_cds`` is set (verbatim, advisory QC); an explicit ``spec.cds``
+    ``use_vector_cds`` is set (verbatim, advisory QC); an explicit ``spec.cds``
     (verbatim native sequence, e.g. a human gene whose exact codons matter); otherwise
     the protein is codon-optimized once. A verbatim CDS is validated, it must be ACGT,
     in-frame, and encode the (truncated) protein. A ``spec.cds`` is additionally checked
@@ -72,7 +72,8 @@ def build_reference(spec: LibrarySpec, seed: int | None = None) -> str:
     not silently recode a reference the user chose. Errors are raised, not swallowed,
     because a bad reference poisons every variant.
     """
-    from_vector = bool(spec.tiled and spec.tiled.use_vector_cds and spec.tiled.starting_vector)
+    vec = spec.vector
+    from_vector = bool(vec and vec.use_vector_cds)
     if spec.cds is None and not from_vector:
         return codon_optimize(spec.truncated_sequence, spec, seed=seed)
 

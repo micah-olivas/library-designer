@@ -3,8 +3,9 @@ name = "hAcyP1"
 protein_sequence = "AEGNTLISVDYEIFGKVQGVFFRKHTQAEGKKLGLVGWVQNTDRGTVQGQLQGPISKVRHMQEWLETRGSPKSHIDKANFNNEKVILKLDYSDFQIVK"
 substitutions = ["F", "Y", "M", "A", "TAG"]   # amino acids and/or literal codons ("TAG" = amber stop)
 truncation = 6
-adaptor_5 = "ggcgcGGTCTCC"
-adaptor_3 = "CCTCTGGcggcg"
+# BsaI site, one spacer base, then the four-base fused overhang the vector presents.
+adaptor_5 = "ggtctccaagc"     # GGTCTC | C | AAGC
+adaptor_3 = "ggtgggagacc"     # GGTG | G | GAGACC (the site, reverse-complemented)
 avoid_enzymes = ["BsaI"]
 platform = "twist_oligo_pools"    # pooled | arrayed | a uSort-M method slug
 max_oligo_length = 350

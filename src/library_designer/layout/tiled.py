@@ -31,6 +31,27 @@ from ..spec import TiledAssemblyParams
 
 @dataclass
 class TileInfo:
+    """One tile of a tiled library, the window plus what it takes to amplify and clone it.
+
+    ``lib.tiles`` is a list of these, one per tile, and ``to_primer_order`` and
+    ``to_vectors`` write from them. ``index`` counts from 0 at the 5' end of the CDS.
+    ``start`` and ``end`` are the window ``[start, end)`` on the frozen reference, always
+    on codon boundaries, so ``lib.reference[t.start:t.end]`` is the WT stretch this tile
+    covers.
+
+    ``fwd_id`` and ``rev_id`` name the pair drawn from the orthogonal primer set, and
+    ``fwd`` and ``rev`` are those primers 5'->3' as you would order them. ``fwd`` sits
+    verbatim at the 5' end of every oligo in this tile's sublibrary and the reverse
+    complement of ``rev`` at the 3' end, so the pair pulls this tile out of the shared
+    pool.
+
+    ``vector`` is the destination vector this tile assembles into, the reference with
+    this one window swapped for ``vector_insert`` and, when a starting vector is set,
+    that whole CDS region put back into the backbone. ``topology`` is ``"circular"``
+    when the vector is a real plasmid backbone and ``"linear"`` when there is none, and
+    it is what tells QC whether to scan the vector across its origin.
+    """
+
     index: int
     start: int          # tile window [start, end) on the reference CDS
     end: int
@@ -162,6 +183,46 @@ def assemble_oligo(reference: str, variant_cds: str, start: int, end: int,
     )
 
 
+def wt_oligo(reference: str, tile: TileInfo, params: TiledAssemblyParams) -> str:
+    """The WT control oligo for one tile: that tile's window taken straight from the frozen
+    reference, carrying the same primers, sites, and overhangs as the tile's mutants.
+
+    This is also the molecule the assembly simulation digests to work out what a clean
+    reaction yields for the tile, so the control that ships is the one QC reasons about."""
+    return assemble_oligo(reference, reference, tile.start, tile.end,
+                          tile.fwd, tile.rev, params)
+
+
+_MUT_COLS = ("position", "wt_residue", "mut_residue", "codon", "mut_index")
+
+
+def wt_control_rows(df: pd.DataFrame, reference: str, protein: str,
+                    tiles: list[TileInfo], params: TiledAssemblyParams) -> pd.DataFrame:
+    """One WT control member per tile, named ``WT_Tile_<i>`` and carrying that tile's
+    WT oligo.
+
+    A tiled pool is N sublibraries that get amplified and assembled separately, so the
+    library's single global WT row rides on no oligo and every sublibrary would ship with
+    nothing unmutated to normalize against. Each row is a copy of the first row, so it keeps
+    the adaptors and whatever else the generator wrote, with the mutation fields cleared and
+    the whole reference as its coding sequence."""
+    base = df.iloc[0].copy()
+    base["protein"] = protein
+    base["variable_dna"] = reference
+    for col in _MUT_COLS:
+        if col in base.index:
+            base[col] = pd.NA
+
+    rows = []
+    for t in tiles:
+        row = base.copy()
+        row["name"] = f"WT_Tile_{t.index}"
+        row["tile"] = t.index
+        row["oligo"] = wt_oligo(reference, t, params)
+        rows.append(row)
+    return pd.DataFrame(rows).reset_index(drop=True)
+
+
 def site_positions(oligo: str, enzyme: str) -> tuple[list[int], list[int]]:
     """(forward-strand hits, reverse-strand hits) of ``enzyme``'s recognition site.
 
@@ -253,7 +314,7 @@ def _assign_primers(tiles: list[tuple[int, int]], reference: str,
     return out
 
 
-def _vector_site_positions(vector: str, enzyme: str, circular: bool) -> list[int]:
+def vector_site_positions(vector: str, enzyme: str, circular: bool) -> list[int]:
     """Positions of every ``enzyme`` recognition site (both strands) on a destination
     vector, wrapping the origin when it is circular."""
     site = ENZYME_SITES[enzyme].upper()
@@ -270,7 +331,7 @@ def _vector_extra_sites(tiles: list[TileInfo], enzyme: str) -> list[str]:
     site beyond the two intended drop-out sites (which would misdirect assembly)."""
     out: list[str] = []
     for t in tiles:
-        pos = _vector_site_positions(t.vector, enzyme, t.topology == "circular")
+        pos = vector_site_positions(t.vector, enzyme, t.topology == "circular")
         if len(pos) != 2:
             out.append(f"tile{t.index}: {len(pos)} {enzyme} site(s) (expected 2) at {pos}")
     return out
@@ -280,8 +341,9 @@ def tile_library(library, params: TiledAssemblyParams) -> dict:
     """Compute tiles, assign primers, and assemble an oligo for every placeable variant.
 
     Returns a dict with ``tiles`` (list[TileInfo]), per-row ``tile``/``oligo`` columns,
-    the loaded ``primer_set``, ``unplaced`` variant names (WT control / codons split
-    across all tile boundaries), and ``vector_extra_sites`` findings.
+    the loaded ``primer_set``, ``unplaced`` variant names (the global WT control / codons
+    split across all tile boundaries), ``wt_controls`` (the per-tile WT rows to append,
+    None when ``params.wt_controls`` is off), and ``vector_extra_sites`` findings.
 
     With ``params.starting_vector`` set, each ``TileInfo.vector`` is the full destination
     plasmid (backbone with the tile window dropped out) and the two terminal overhangs are
@@ -293,13 +355,17 @@ def tile_library(library, params: TiledAssemblyParams) -> dict:
         raise ValueError("Library is not codon-optimized yet, call codon_optimize() first.")
 
     dest = None
-    if params.starting_vector:
+    vec = library.spec.resolve_vector(params)
+    if vec is not None:
         from .vector_io import assemble_vector, locating_kwargs, resolve_destination, terminal_contexts
 
-        dest = resolve_destination(params.starting_vector,
-                                   **locating_kwargs(library.spec, params))
+        dest = resolve_destination(vec.path, **locating_kwargs(library.spec, params))
         term5, term3 = terminal_contexts(dest, params.overhang_len)
-        params = replace(params, vector_context_5=term5, vector_context_3=term3)
+        # Record the resolved path on the params too, so the layout the library carries
+        # names its own backbone even when the vector came from the spec rather than the
+        # tiled block.
+        params = replace(params, starting_vector=vec.path,
+                         vector_context_5=term5, vector_context_3=term3)
 
     tiles_coords = compute_tiles(len(reference), params)
     primer_set = load_primer_set(params.primer_set, params.enzyme)
@@ -319,8 +385,8 @@ def tile_library(library, params: TiledAssemblyParams) -> dict:
     # to keep the vector's own CDS (use_vector_cds) we flag this in QC; otherwise, when
     # we control the reference, a stray site can only be the user's backbone, so we stop.
     vector_extra = _vector_extra_sites(tiles, params.enzyme)
-    tiled_spec = library.spec.tiled
-    if vector_extra and not (tiled_spec and tiled_spec.use_vector_cds):
+    resolved_vector = library.spec.resolve_vector(params)
+    if vector_extra and not (resolved_vector and resolved_vector.use_vector_cds):
         raise ValueError(
             f"destination vector(s) carry {params.enzyme} site(s) beyond the two intended "
             "drop-out sites, which would misdirect Golden Gate assembly: "
@@ -338,7 +404,9 @@ def tile_library(library, params: TiledAssemblyParams) -> dict:
             tile_col.append(pd.NA)
             oligo_col.append(pd.NA)
             if pd.isna(idx) and not pd.isna(dna):
-                unplaced.append(str(name))       # WT control: no position to tile
+                # The global WT control has no position, so no one tile contains it. The
+                # per-tile WT controls below are what actually ship in the pool.
+                unplaced.append(str(name))
             continue
         ti = assign_tile(int(idx), tiles_coords)
         if ti is None:
@@ -350,6 +418,11 @@ def tile_library(library, params: TiledAssemblyParams) -> dict:
         oligo_col.append(assemble_oligo(reference, str(dna), t.start, t.end, t.fwd, t.rev, params))
         tile_col.append(ti)
 
+    wt_controls = None
+    if params.wt_controls:
+        wt_controls = wt_control_rows(df, reference, library.spec.truncated_sequence,
+                                      tiles, params)
+
     return {
         "tiles": tiles,
         "tile": tile_col,
@@ -357,5 +430,6 @@ def tile_library(library, params: TiledAssemblyParams) -> dict:
         "primer_set": primer_set,
         "unplaced": unplaced,
         "vector_extra_sites": vector_extra,
+        "wt_controls": wt_controls,   # extra rows to append, one WT member per tile
         "params": params,     # resolved (vector-derived terminal overhangs filled in)
     }

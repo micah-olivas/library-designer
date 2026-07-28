@@ -26,3 +26,13 @@ packages = ["src/library_designer"]
 dev = [
     "pytest>=9.1.1",
 ]
+# The notebooks are the package's main teaching surface, so JupyterLab comes with the
+# project rather than being passed in with --with on every launch. Both groups are
+# installed by default; `uv sync --no-group notebooks` skips this one.
+notebooks = [
+    "jupyterlab>=4.0",
+    "ipykernel>=6.29",
+]
+
+[tool.uv]
+default-groups = ["dev", "notebooks"]

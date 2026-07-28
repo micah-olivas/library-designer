@@ -12,6 +12,7 @@ library serializes several ways.
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -20,6 +21,27 @@ from .regions import assemble, usortm_sequence
 
 # Characters uSort-M forbids in variant names (file paths, FASTA headers, delimiters).
 _BAD_NAME = re.compile(r"[/|>\s]")
+
+
+def run_stamp(when: datetime | None = None) -> str:
+    """Local wall-clock stamp for a run directory, sortable and filename-safe."""
+    return (when or datetime.now().astimezone()).strftime("%Y%m%d_%H%M%S")
+
+
+def run_directory(base: str | Path = "out", name: str | None = None,
+                  when: datetime | None = None, create: bool = True) -> Path:
+    """``base/<name>_<stamp>``, the directory one run's files go in.
+
+    A run writes to its own dated directory so a second run cannot quietly overwrite the
+    first and every file on disk says which run produced it. ``when`` pins the stamp, so a
+    library can name the directory after the moment its sequences were built rather than
+    the moment they were written. The directory is created unless ``create=False``. With
+    no ``name`` the directory is the bare stamp."""
+    stamp = run_stamp(when)
+    d = Path(base) / (f"{name}_{stamp}" if name else stamp)
+    if create:
+        d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def _assembled(library) -> pd.Series:
@@ -62,6 +84,19 @@ def _require_complete(library) -> None:
 
 
 def to_full_csv(library, path: str | Path) -> None:
+    """Write the master table, every column of ``lib.df`` plus the assembled construct.
+
+    Adds ``sequence`` (``adaptor_5 + variable_dna + adaptor_3``, uppercase), ``length``,
+    ``gc_content`` for the variable region alone, and ``stamp_adaptiveness``, the
+    relative adaptiveness of the codon this variant carries at its own position. The
+    last two are rounded to three places. ``stamp_adaptiveness`` is NA wherever there is
+    no stamped position, so for the wild-type control and for every member of a sequence
+    set. Those four columns and the region columns are grouped 5'->3' at the right of
+    the table.
+
+    Unlike the order-form exporters, this one keeps rows whose optimization failed, with
+    a blank sequence, so a failed run can still be read.
+    """
     _require_optimized(library)   # failed rows kept (blank sequence) for inspection
     df = library.df.copy()
     df["sequence"] = _assembled(library)
@@ -87,6 +122,18 @@ def to_full_csv(library, path: str | Path) -> None:
 
 
 def to_usortm(library, path: str | Path) -> None:
+    """Write the uSort-M handoff, ``name,sequence``, one row per variant.
+
+    The sequence is case-encoded, adaptors lowercase and the variable region uppercase,
+    which is how uSort-M reads the region boundaries. Case is applied here and nowhere
+    else, so ``lib.df`` stays uppercase throughout.
+
+    Refuses a library with a failed variant, since an order should not go out
+    incomplete, and refuses names carrying ``/``, ``|``, ``>``, or whitespace, which
+    uSort-M forbids. A tiled library raises ``NotImplementedError``, because a tiled
+    pool is many sublibraries with their own per-tile references and so has no one
+    variable region to write. Use ``to_oligo_pool`` for the physical order.
+    """
     if getattr(library, "tiles", None) is not None:
         raise NotImplementedError(
             "to_usortm() does not support tiled libraries. A tiled pool is many "
@@ -109,6 +156,27 @@ def to_usortm(library, path: str | Path) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(path, index=False)
 
+    # Record what was handed off, next to the run identity, so the downstream tool can tie
+    # the CSV it is reading to the design run that produced it. The CSV itself stays exactly
+    # `name,sequence`: uSort-M parses it strictly, so the provenance goes in the record
+    # beside it rather than as extra columns or a comment line it would have to tolerate.
+    library.design_specs["handoff"] = {
+        "run_id": library.run_id,
+        "created": library.created,
+        "variants_csv": Path(path).name,
+        "n_variants": len(out),
+        "sha256": _sha256(path),
+        "format": "name,sequence; flanking adaptors lowercase, variable region uppercase",
+    }
+
+
+def _sha256(path: str | Path) -> str:
+    """Digest of a written file, so a later reader can tell whether it is the one the
+    record describes (hand-edited, truncated, or mixed up with another run's)."""
+    import hashlib
+
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
 
 def to_vendor(library, path: str | Path, method: str | None = None,
               pool_name: str | None = None) -> None:
@@ -117,6 +185,17 @@ def to_vendor(library, path: str | Path, method: str | None = None,
 
     - ``pooled`` uses the Twist oligo-pool style, with one shared Pool Name and an all-uppercase insert.
     - ``arrayed`` uses one row per named construct (IDT eBlocks or gene fragments).
+
+    So the pooled form carries no variant names, only the one shared pool name taken from
+    ``pool_name`` or ``spec.name``, while the arrayed form names every row. Any other
+    ``method`` raises.
+
+    For a tiled library the molecules to order are the tile oligos, not the full coding
+    sequence each variant carries, so those are what goes on the form. That includes the
+    per-tile WT controls; the global ``WT`` row rides on no oligo and is left off, as it is
+    in ``to_oligo_pool``.
+
+    Refuses a library with a variant that failed optimization.
     """
     _require_complete(library)
     if method is None:
@@ -126,7 +205,13 @@ def to_vendor(library, path: str | Path, method: str | None = None,
         from .methods import platform_type
         method = platform_type(platform)
 
-    seqs = _assembled(library)   # plain uppercase construct
+    if getattr(library, "tiles", None) is not None:
+        placed = library.df["oligo"].map(lambda o: isinstance(o, str))
+        seqs = library.df["oligo"][placed]
+        names = library.df["name"][placed].astype(str)
+    else:
+        seqs = _assembled(library)   # plain uppercase construct
+        names = library.df["name"].astype(str)
     if method == "pooled":
         out = pd.DataFrame({
             "Pool Name": pool_name or library.spec.name,
@@ -135,7 +220,7 @@ def to_vendor(library, path: str | Path, method: str | None = None,
         })
     elif method == "arrayed":
         out = pd.DataFrame({
-            "Name": library.df["name"].astype(str),
+            "Name": names,
             "Insert Length": seqs.str.len(),
             "Insert Sequence": seqs,
         })
@@ -154,7 +239,9 @@ def _require_tiled(library) -> None:
 
 def to_oligo_pool(library, path: str | Path) -> None:
     """The single pooled synthesis order for a tiled library: ``name,sequence`` (one
-    assembled oligo per placed variant). Variant names are validated as for uSort-M."""
+    assembled oligo per placed member, mutants and the per-tile ``WT_Tile_<i>`` controls
+    alike). The global ``WT`` row rides on no oligo, so it is left off. Names are validated
+    as for uSort-M."""
     _require_tiled(library)
     df = library.df
     mask = df["oligo"].map(lambda o: isinstance(o, str))
@@ -185,13 +272,34 @@ def to_primer_order(library, path: str | Path,
 
 
 def to_vectors(library, path: str | Path) -> None:
-    """Manifest of the per-tile Golden Gate destination vectors, one row per tile.
+    """Manifest of the Golden Gate destination vectors you build to run the library.
 
-    Each ``vector_sequence`` is the full destination plasmid when ``tiled.starting_vector``
-    is set (the backbone with that tile's window dropped out), or the CDS-region cassette
-    alone when it is not. The row count is the number of separate destination vectors you
-    build to run the library. For annotated plasmid maps use ``to_vector_maps``."""
-    _require_tiled(library)
+    A tiled library gets one row per tile: each ``vector_sequence`` is the full destination
+    plasmid when a starting vector is set (the backbone with that tile's window dropped
+    out), or the CDS-region cassette alone when it is not. A standard library gets the one
+    row it needs, the plasmid with the CDS replaced by the drop-out, plus the two fused
+    overhangs the cut vector presents. For annotated plasmid maps use ``to_vector_maps``."""
+    if getattr(library, "tiles", None) is None:
+        from .layout.destination import build_destination
+
+        dv = build_destination(library)
+        from .layout.vector_io import origin_in_source
+        out = pd.DataFrame([{
+            "topology": dv.topology,
+            "cds_dropout_start": dv.start,       # window on the reference CDS, not on the vector
+            "cds_dropout_end": dv.end,
+            "overhang_5": dv.overhang_5,
+            "overhang_3": dv.overhang_3,
+            "vector_length": dv.length,
+            # The sequence is read from an origin upstream of the insert's promoter, so name
+            # the base of the starting vector it begins at.
+            "origin_in_starting_vector": origin_in_source(dv.dest),
+            "insert_strand_in_starting_vector": -1 if dv.dest.flipped else 1,
+            "vector_sequence": dv.sequence,
+        }])
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        out.to_csv(path, index=False)
+        return
     rows = [
         {
             "tile": t.index, "start": t.start, "end": t.end,
@@ -214,21 +322,50 @@ def _find_all(hay: str, needle: str) -> list[int]:
     return out
 
 
-def to_vector_maps(library, directory: str | Path) -> None:
-    """Write one annotated GenBank map per tile, the destination plasmids to clone.
+def _map_targets(library) -> list[dict]:
+    """The destination vectors to emit maps for, one per tile or the single one a standard
+    library needs, each reduced to what the annotator below draws on."""
+    tiles = getattr(library, "tiles", None)
+    if tiles is None:
+        from .layout.destination import build_destination
 
-    Requires ``tiled.starting_vector`` (the backbone supplies the full plasmid to
-    annotate). Emits ``tile{i}_destination.gb`` for
-    every tile plus a ``destination_vectors.csv`` manifest. Each map carries the two BsaI
-    sites, the drop-out, the two fused overhangs, the retained 5'/3' CDS arms, and any
-    backbone features from the starting vector that do not overlap the insert."""
-    _require_tiled(library)
+        dv = build_destination(library)
+        return [{
+            "file": "destination.gb", "id": "destination", "label": "CDS drop-out",
+            "start": dv.start, "end": dv.end, "vector": dv.sequence, "topology": dv.topology,
+            "extra": {},
+        }]
+    return [{
+        "file": f"tile{t.index}_destination.gb", "id": f"tile{t.index}",
+        "label": f"tile {t.index} (window {t.start}-{t.end})",
+        "start": t.start, "end": t.end, "vector": t.vector, "topology": t.topology,
+        "extra": {"tile": t.index, "fwd_primer_id": t.fwd_id, "rev_primer_id": t.rev_id},
+    } for t in tiles]
+
+
+def to_vector_maps(library, directory: str | Path) -> None:
+    """Write the destination plasmids to clone, as annotated GenBank maps.
+
+    Needs a starting vector (the backbone supplies the full plasmid to annotate). A tiled
+    library gets one ``tile{i}_destination.gb`` per tile; a standard library gets a single
+    ``destination.gb``. Both come with a ``destination_vectors.csv`` manifest. Each map
+    carries the two BsaI sites, the drop-out, the two fused overhangs, the retained 5'/3'
+    CDS arms, and any backbone features from the starting vector that do not overlap the
+    insert.
+
+    Two kinds of backbone feature are dropped. One overlapping the located insert goes,
+    since the insert replaces what it annotated, and so does one straddling the origin
+    the map is read from, which GenBank cannot write in one piece. The manifest's
+    ``features_carried`` column says how many survived."""
     params = library.tiled_params
-    if not params or not params.starting_vector:
+    vec = library.spec.resolve_vector(params)
+    if vec is None:
         raise ValueError(
-            "to_vector_maps needs tiled.starting_vector set (the destination plasmid to "
-            "clone into). Without a backbone, use to_vectors() for the CDS-cassette manifest."
+            "to_vector_maps needs a starting_vector set (the destination plasmid to clone "
+            "into). Without a backbone, use to_vectors() for the CDS-cassette manifest."
         )
+    if getattr(library, "tiles", None) is None and library.reference is None:
+        raise ValueError("Library is not codon-optimized yet, call codon_optimize() first.")
     try:
         from Bio import SeqIO
         from Bio.Seq import Seq
@@ -240,27 +377,30 @@ def to_vector_maps(library, directory: str | Path) -> None:
             "Reinstall library-designer if it is missing."
         ) from exc
 
-    from .checks.motifs import ENZYME_SITES
-    from .layout.vector_io import locating_kwargs, resolve_destination
+    from .checks.motifs import ENZYME_SITES, cut_geometry
+    from .layout.vector_io import (
+        insert_offset, locating_kwargs, origin_in_source, resolve_destination,
+    )
     from .regions import reverse_complement
 
-    dest = resolve_destination(params.starting_vector,
-                               **locating_kwargs(library.spec, params))
+    dest = resolve_destination(vec.path, **locating_kwargs(library.spec, params))
     reference = library.reference
-    stuffer = params.vector_insert.upper()
-    site = ENZYME_SITES[params.enzyme].upper()
+    enzyme = vec.enzyme
+    stuffer = vec.vector_insert.upper()
+    site = ENZYME_SITES[enzyme].upper()
     site_rc = reverse_complement(site)
-    o = params.overhang_len
+    o = params.overhang_len if params is not None else cut_geometry(enzyme)[1]
     name = library.spec.name
 
     d = Path(directory)
     d.mkdir(parents=True, exist_ok=True)
     manifest = []
-    for t in library.tiles:
-        V, N = t.vector, len(t.vector)
-        circular = t.topology == "circular"
-        offset = 0 if circular else dest.start          # where the CDS region sits in V
-        s, e, L = t.start, t.end, len(stuffer)
+    for target in _map_targets(library):
+        V, N = target["vector"], len(target["vector"])
+        circular = target["topology"] == "circular"
+        offset = insert_offset(dest)                    # where the CDS region sits in V
+        s, e, L = target["start"], target["end"], len(stuffer)
+        region_len = len(_cds_region(reference, s, e, stuffer))
         cds5 = offset + s                                 # end of the retained 5' arm / start of dropout
         drop_end = cds5 + L                               # end of the dropout / start of retained 3' arm
 
@@ -277,11 +417,11 @@ def to_vector_maps(library, directory: str | Path) -> None:
             add(offset, cds5, "misc_feature", "CDS (5' arm, retained)")
         if e < len(reference):
             add(drop_end, drop_end + (len(reference) - e), "misc_feature", "CDS (3' arm, retained)")
-        add(cds5, drop_end, "misc_feature", f"{params.enzyme} drop-out (replaced by tile)")
+        add(cds5, drop_end, "misc_feature", f"{enzyme} drop-out (replaced by the insert)")
         for m in _find_all(stuffer, site):
-            add(cds5 + m, cds5 + m + len(site), "protein_bind", f"{params.enzyme} site", strand=1)
+            add(cds5 + m, cds5 + m + len(site), "protein_bind", f"{enzyme} site", strand=1)
         for m in _find_all(stuffer, site_rc):
-            add(cds5 + m, cds5 + m + len(site_rc), "protein_bind", f"{params.enzyme} site", strand=-1)
+            add(cds5 + m, cds5 + m + len(site_rc), "protein_bind", f"{enzyme} site", strand=-1)
         add(cds5 - o, cds5, "misc_feature", "fused overhang 5'")
         add(drop_end, drop_end + o, "misc_feature", "fused overhang 3'")
 
@@ -294,27 +434,42 @@ def to_vector_maps(library, directory: str | Path) -> None:
             if not (f.end <= dest.start or f.start >= dest.end):
                 continue                                  # overlaps the insert, drop it
             def _remap(p: int) -> int:
+                # Into the emitted frame: the two backbone arms sit either side of the CDS
+                # region, which starts at `offset` (the rotation the origin implies).
                 if circular:
-                    return (len(_cds_region(reference, s, e, stuffer)) + (p - dest.end)) % N if p >= dest.end \
-                        else (N - dest.start + p)
+                    if p < dest.start:
+                        return (offset - (dest.start - p)) % N
+                    return (offset + region_len + (p - dest.end)) % N
                 return p if p < dest.start else p + (N - len(dest.full_seq))
-            a, b = _remap(f.start), _remap(f.end)
+            # Take the end from the length, not from _remap: a feature finishing on the
+            # vector's last base has an exclusive end of N, which the wrap would fold to 0
+            # and silently drop the feature. A feature that straddles the origin overshoots
+            # N here and is skipped, which is right, GenBank cannot draw it in one piece.
+            a = _remap(f.start)
+            b = a + (f.end - f.start)
             if 0 <= a < b <= N:
                 feats.append(SeqFeature(SimpleLocation(a, b, strand=f.strand),
                                         type=f.type, qualifiers={"label": [f.label or f.type]}))
                 carried += 1
 
+        # The map of a circular plasmid is read from an origin upstream of the insert's
+        # promoter, so say which base of the starting vector that was. Without it the
+        # emitted coordinates cannot be related back to the plasmid you supplied.
+        origin_base = origin_in_source(dest)
+        strand = " on the minus strand" if dest.flipped else ""
+        read_from = (f", read from base {origin_base} of {Path(vec.path).name}{strand}"
+                     if circular or dest.flipped else "")
         rec = SeqRecord(
-            Seq(V), id=f"tile{t.index}", name=f"tile{t.index}_dest",
-            description=f"{name} tiled destination vector, tile {t.index} (window {s}-{e})",
-            annotations={"molecule_type": "DNA", "topology": t.topology},
+            Seq(V), id=target["id"], name=f"{target['id']}_dest",
+            description=f"{name} destination vector, {target['label']}{read_from}",
+            annotations={"molecule_type": "DNA", "topology": target["topology"]},
         )
         rec.features = feats
-        SeqIO.write(rec, str(d / f"tile{t.index}_destination.gb"), "genbank")
+        SeqIO.write(rec, str(d / target["file"]), "genbank")
         manifest.append({
-            "tile": t.index, "file": f"tile{t.index}_destination.gb",
-            "topology": t.topology, "vector_length": N,
-            "fwd_primer_id": t.fwd_id, "rev_primer_id": t.rev_id,
+            "vector": target["id"], **target["extra"], "file": target["file"],
+            "topology": target["topology"], "vector_length": N,
+            "origin_in_starting_vector": origin_base,
             "features_carried": carried,
         })
     pd.DataFrame(manifest).to_csv(d / "destination_vectors.csv", index=False)
@@ -322,3 +477,145 @@ def to_vector_maps(library, directory: str | Path) -> None:
 
 def _cds_region(reference: str, s: int, e: int, stuffer: str) -> str:
     return reference[:s] + stuffer + reference[e:]
+
+
+_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _file_stem(name: str) -> str:
+    """A variant name as a filename. An amber stop is ``*``, which is legal on this
+    filesystem but globs in a shell and is rejected on Windows, so spell it out."""
+    return _UNSAFE.sub("_", name.replace("*", "stop"))
+
+
+def to_assembled_vectors(library, directory: str | Path, fmt: str = "both") -> None:
+    """Write the clone every variant assembles into: the simulated Golden Gate product.
+
+    These are the plasmids to sequence against. One annotated GenBank per variant (the
+    backbone features carried over, the coding sequence, and the mutated codon marked), a
+    single ``all_clones.fasta`` holding the same set, the parent plasmid as
+    ``parent_WT.gb`` for reference, and an ``assembled_vectors.csv`` manifest recording each
+    clone's file, length, its codon change, and whether it differs from the parent only where
+    it should (``as_intended``, which for the wild-type control means not at all).
+
+    ``fmt`` is ``"genbank"``, ``"fasta"``, or ``"both"``. Needs a starting vector and
+    adaptors that release the insert; a variant the reaction cannot make (see ``check()``) is
+    left out, and the number skipped is raised as a warning."""
+    if fmt not in ("genbank", "fasta", "both"):
+        raise ValueError(f"Unknown fmt {fmt!r} (use 'genbank', 'fasta', or 'both').")
+    _require_optimized(library)
+    try:
+        from Bio import SeqIO
+        from Bio.Seq import Seq
+        from Bio.SeqFeature import SeqFeature, SimpleLocation
+        from Bio.SeqRecord import SeqRecord
+    except ImportError as exc:
+        raise ImportError(
+            "Writing assembled clones needs BioPython, a base dependency. "
+            "Reinstall library-designer if it is missing."
+        ) from exc
+
+    from .checks.assembly import assembled_products, parent_vector
+    from .layout.vector_io import (
+        insert_offset, locating_kwargs, origin_in_source, resolve_destination,
+    )
+
+    spec = library.spec
+    vec = spec.resolve_vector(library.tiled_params)
+    parent = parent_vector(library)
+    dest = resolve_destination(vec.path, **locating_kwargs(spec, library.tiled_params))
+    reference = library.reference
+    cds_at, n = insert_offset(dest), len(parent)
+    source = Path(vec.path).name
+
+    # Every clone is the same molecule apart from one codon, so the backbone annotation is
+    # worked out once and reused. Coordinates are the parent's frame, which is the frame
+    # assembled_products returns its products in.
+    # The clone carries the reference where the plasmid carried its own insert, so a feature
+    # 3' of the locus shifts by the difference in their lengths. Getting this from the located
+    # region instead would misplace every downstream annotation whenever the two differ.
+    def _remap(p: int) -> int:
+        if p < dest.start:
+            return p if dest.topology != "circular" else (cds_at - (dest.start - p)) % n
+        downstream = len(reference) + (p - dest.end)
+        return (cds_at + downstream) % n if dest.topology == "circular" else dest.start + downstream
+
+    shared: list = [SeqFeature(SimpleLocation(cds_at, cds_at + len(reference), strand=1),
+                               type="CDS", qualifiers={"label": [spec.name], "codon_start": ["1"]})]
+    for f in dest.features:
+        if f.end <= f.start or not (f.end <= dest.start or f.start >= dest.end):
+            continue                                     # overlaps the insert, the CDS covers it
+        a = _remap(f.start)
+        b = a + (f.end - f.start)
+        if 0 <= a < b <= n:
+            shared.append(SeqFeature(SimpleLocation(a, b, strand=f.strand), type=f.type,
+                                     qualifiers={"label": [f.label or f.type]}))
+
+    d = Path(directory)
+    d.mkdir(parents=True, exist_ok=True)
+    genbank, fasta = fmt in ("genbank", "both"), fmt in ("fasta", "both")
+
+    def _record(name: str, seq: str, feats: list, note: str) -> "SeqRecord":
+        rec = SeqRecord(Seq(seq), id=_file_stem(name)[:16], name=_file_stem(name)[:16],
+                        description=f"{spec.name} {name} assembled into {source}: {note}",
+                        annotations={"molecule_type": "DNA", "topology": dest.topology})
+        rec.features = feats
+        return rec
+
+    if genbank:
+        SeqIO.write(_record("WT_parent", parent, list(shared), "the parent plasmid, reference CDS"),
+                    str(d / "parent_WT.gb"), "genbank")
+
+    rows, records, written = [], [], 0
+    for name, product, mut_index in assembled_products(library):
+        diffs = [i for i, (a, b) in enumerate(zip(product, parent)) if a != b]
+        lo, hi = (min(diffs), max(diffs) + 1) if diffs else (cds_at, cds_at)
+        codon_lo = cds_at + mut_index * 3 if mut_index is not None else None
+        feats = list(shared)
+        if codon_lo is not None:
+            wt_codon = parent[codon_lo:codon_lo + 3]
+            new_codon = product[codon_lo:codon_lo + 3]
+            feats.append(SeqFeature(
+                SimpleLocation(codon_lo, codon_lo + 3, strand=1), type="variation",
+                qualifiers={"label": [f"{name} ({wt_codon}>{new_codon})"]},
+            ))
+        else:
+            wt_codon = new_codon = ""
+        stem = _file_stem(name)
+        if genbank:
+            note = f"{wt_codon}>{new_codon} at codon {mut_index + 1}" if codon_lo is not None \
+                else "wild-type control"
+            SeqIO.write(_record(name, product, feats, note), str(d / f"{stem}.gb"), "genbank")
+        if fasta:
+            records.append(_record(name, product, [], ""))
+        # For a variant, "as intended" means the only difference sits in its own codon. For
+        # the wild-type control it means no difference at all.
+        as_intended = (not diffs) if codon_lo is None else (
+            bool(diffs) and lo >= codon_lo and hi <= codon_lo + 3
+        )
+        rows.append({
+            "name": name, "file": f"{stem}.gb" if genbank else "",
+            "length": len(product), "topology": dest.topology,
+            "codon": (mut_index + 1) if mut_index is not None else pd.NA,
+            "wt_codon": wt_codon, "clone_codon": new_codon,
+            "bases_changed": len(diffs),
+            "changed_at": f"{lo + 1}-{hi}" if diffs else "",
+            "as_intended": as_intended,
+        })
+        written += 1
+
+    if fasta:
+        SeqIO.write(records, str(d / "all_clones.fasta"), "fasta")
+    manifest = pd.DataFrame(rows)
+    if not manifest.empty:
+        manifest["codon"] = manifest["codon"].astype("Int64")   # no float codon numbers
+    manifest.to_csv(d / "assembled_vectors.csv", index=False)
+    skipped = int(library.df["variable_dna"].notna().sum()) - written
+    if skipped > 0:
+        import warnings
+
+        warnings.warn(
+            f"{skipped} variant(s) were left out of {d}: the reaction cannot make them. "
+            "Run library.check() to see why.",
+            RuntimeWarning, stacklevel=2,
+        )

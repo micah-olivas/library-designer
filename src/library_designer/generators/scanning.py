@@ -49,6 +49,18 @@ class SubstitutionScan:
         self.spec = spec
 
     def generate(self) -> Library:
+        """Build the variant table, one row per substitution per position, plus a WT control.
+
+        Positions where the substitution is already the wild-type residue are skipped, so an
+        alanine scan of a protein carrying 12 alanines gives 12 fewer members than there are
+        positions. A ``*`` in the input protein is skipped as a position too. Names carry
+        full-protein numbering even when ``truncation`` is set, so ``K7A`` means residue 7 of
+        the protein you supplied. Two substitutions that resolve to the same residue symbol
+        at one position would collide, and that raises rather than silently dropping one.
+
+        Sequences are not built here. The returned library has no ``variable_dna`` column
+        until ``codon_optimize()`` runs.
+        """
         spec = self.spec
         seq = spec.truncated_sequence
         subs = [_classify(s) for s in spec.substitutions]

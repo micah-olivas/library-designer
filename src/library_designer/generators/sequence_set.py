@@ -87,7 +87,14 @@ class SequenceSet:
 
     def __init__(self, spec: LibrarySpec, proteins: Mapping[str, str]):
         self.spec = spec
-        self.proteins = dict(proteins)
+        # A mapping cannot repeat a key, but a list of pairs can, and dict() would keep the
+        # last one silently. from_fasta already refuses duplicates, so refuse them here too.
+        pairs = list(proteins.items() if hasattr(proteins, "items") else proteins)
+        seen = [n for n, _ in pairs]
+        dupes = sorted({n for n in seen if seen.count(n) > 1})
+        if dupes:
+            raise ValueError(f"Duplicate member name(s) {dupes}; every member needs its own name.")
+        self.proteins = dict(pairs)
 
     @classmethod
     def from_fasta(cls, spec: LibrarySpec, path: str | Path) -> "SequenceSet":
@@ -95,6 +102,16 @@ class SequenceSet:
         return cls(spec, _read_fasta(path))
 
     def generate(self) -> Library:
+        """Build the member table, one row per protein.
+
+        Names are checked against what a FASTA header and the uSort-M handoff allow, so a
+        ``/``, ``|``, ``>``, or whitespace is refused. Sequences are checked against the 20
+        canonical residues, so a stop or ambiguity code is refused here rather than becoming
+        an arbitrary residue during reverse translation. The scan-only columns
+        (``position``, ``wt_residue``, ``mut_residue``, ``codon``, ``mut_index``) are present
+        but NA, which is what lets one set of exporters and one set of QC checks serve both
+        library kinds.
+        """
         spec = self.spec
         if not self.proteins:
             raise ValueError("SequenceSet needs at least one protein sequence.")
