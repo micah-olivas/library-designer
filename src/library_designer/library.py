@@ -344,6 +344,11 @@ class Library:
             "primers_dropped": result["primer_set"].dropped,
             "n_tiles": len(result["tiles"]),
             "wt_controls": self._wt_control_names,
+            # Where the boundaries came from, and what the overhangs cost either way, so the
+            # record says whether the search was on and what it bought.
+            "overhangs_optimized": params.optimize_overhangs,
+            "overhang_cost": result["overhang_cost"],
+            "overhang_cost_unsearched": result["overhang_cost_unsearched"],
         }
         return self
 
@@ -356,7 +361,7 @@ class Library:
         Falls back to ``spec.tiled`` before ``tile()`` has run."""
         return self._tiled_params if self._tiled_params is not None else self.spec.tiled
 
-    def destination_vector(self):
+    def destination_vector(self, strict: bool = True):
         """The one destination vector a standard (untiled) library clones into, as a
         ``DestinationVector``: the starting plasmid with the CDS replaced by the Golden
         Gate drop-out, plus the two fused overhangs the cut vector presents.
@@ -364,10 +369,15 @@ class Library:
         Needs ``spec.starting_vector`` and a codon-optimized reference. The drop-out is
         placed so those overhangs are the ones the digested oligo carries, which is read
         out of the adaptors. A tiled library has one vector per tile instead, on
-        ``self.tiles``."""
+        ``self.tiles``.
+
+        Raises when the plasmid and the adaptors between them give the cut vector two
+        overhangs that collide, since that vector re-closes empty or takes the insert
+        backwards and there is no correct product to clone. Pass ``strict=False`` to build
+        it anyway and inspect it, or read ``lib.overhang_pairs()`` for the full picture."""
         from .layout.destination import build_destination
 
-        return build_destination(self)
+        return build_destination(self, strict=strict)
 
     def simulate_assembly(self):
         """Simulate the Golden Gate reaction(s) this design implies, one ``AssemblyResult``
@@ -425,6 +435,42 @@ class Library:
         from .checks.assembly import assembled_product
 
         return assembled_product(self, name)
+
+    def overhangs(self):
+        """The fused Golden Gate overhangs this design leaves, one row per end.
+
+        Two per tile for a tiled library, or the destination vector's pair for a standard
+        one. ``shared_self`` is how many of its bases each overhang shares with its own
+        reverse complement, so a full count means it is palindromic and a copy of the
+        fragment can anneal to it. ``lib.overhang_pairs()`` is the pairwise view."""
+        from .checks.overhangs import overhang_table
+
+        return overhang_table(self)
+
+    def overhang_pairs(self, all_pairs: bool = False):
+        """The pairs of fused overhangs that share a reaction, worst first, as a DataFrame.
+
+        This is the table to read before ordering. One row per tile, since a tile's two ends
+        are the only overhangs that ever meet: it is amplified out of the pool on its own and
+        assembled into the vector built around its own window. ``shared`` counts the bases the
+        pair has in common as written, which is how easily the cut vector re-closes on itself,
+        and ``shared_flipped`` counts them against the reverse complement, which is how easily
+        the fragment goes in backwards. A pair should share at most one base of either;
+        ``risk`` grades that and ``note`` says what the consequence is.
+
+        ``all_pairs=True`` also lists the cross-tile pairs. Those never share a tube, so their
+        rows carry the counts for reference and a ``risk`` of ``"n/a"``."""
+        from .checks.overhangs import pair_table
+
+        return pair_table(self, all_pairs=all_pairs)
+
+    def plot_overhangs(self):
+        """Return a Figure of overhang homology, every end against every other (renders
+        inline in a notebook). Needs a design with a Golden Gate reaction, so ``tile()`` or a
+        starting vector first."""
+        from .viz import overhang_figure
+
+        return overhang_figure(self)
 
     def check(self):
         """Run QC (optimization, translation, forbidden sites, length), returning a ``CheckReport``.

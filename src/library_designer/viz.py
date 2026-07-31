@@ -1,10 +1,13 @@
-"""Codon-usage QC visualization.
+"""QC visualization: codon usage, the tile layout, and overhang homology.
 
-Plots relative codon adaptiveness (w = freq / best-synonymous-freq; 1.0 = optimal
-codon) along the CDS: the WT backbone as a line, and each variant's stamped codon
-as a point coloured by sublibrary. Points below the threshold flag codons the
+The codon-usage figure plots relative codon adaptiveness (w = freq / best-synonymous-freq;
+1.0 = optimal codon) along the CDS: the WT backbone as a line, and each variant's stamped
+codon as a point coloured by sublibrary. Points below the threshold flag codons the
 motif-avoidance had to compromise on. Amber (`*`) stamps are expected to sit low.
 a stop codon is pinned, not optimized.
+
+The overhang figure is the review surface for Golden Gate specificity, every fused overhang
+against every other (see `checks/overhangs.py`).
 """
 from __future__ import annotations
 
@@ -160,3 +163,118 @@ def tiling_figure(library):
     ax.set_xlabel("CDS position (nt)")
     ax.set_ylabel("tile (fwd / rev primer)")
     return fig
+
+
+# Risk tiers from checks/overhangs.py, palest to loudest.
+_RISK_COLOURS = {"ok": "#EDF2F4", "watch": "#F7E3A1", "high": "#E8A33D", "collision": "#C1392B"}
+# Two tiles never share a tube, so their cell is shown but not graded.
+_CROSS_COLOUR = "#F7F8F9"
+
+
+def overhang_figure(library):
+    """Return a matplotlib Figure of overhang homology, every fused overhang against every
+    other.
+
+    Each cell is how many of the four bases two overhangs share, taking the worse of the two
+    orientations: as written, which is how the cut vector re-closes on itself, and against
+    the reverse complement, which is how a fragment goes in backwards. The diagonal compares
+    an overhang with its own reverse complement, so a hot diagonal cell is a palindrome.
+    Cells are coloured by the risk tier the count falls in, and the ones inside a single
+    reaction are boxed, since those are the pairs that meet in one tube.
+
+    A design with no Golden Gate reaction has nothing to draw, so this raises. Call
+    ``tile()`` first, or set a starting vector.
+    """
+    from .checks.overhangs import (
+        MAX_SHARED,
+        overhang_ends,
+        risk_of,
+        self_risk,
+        self_shared,
+        shared_bases,
+    )
+    from .regions import reverse_complement
+
+    ends = overhang_ends(library)
+    if not ends:
+        raise ValueError(
+            "No fused overhangs to plot. Tile the library with tile(), or set "
+            "spec.starting_vector so there is a destination vector to cut."
+        )
+
+    n = len(ends)
+    width = len(ends[0].seq)
+    counts = [[0] * n for _ in range(n)]
+    for i, a in enumerate(ends):
+        for j, b in enumerate(ends):
+            counts[i][j] = (
+                self_shared(a) if i == j
+                else max(shared_bases(a.seq, b.seq),
+                         shared_bases(a.seq, reverse_complement(b.seq)))
+            )
+
+    side = max(4.2, 0.52 * n + 2.4)
+    fig = _new_figure(figsize=(side, side * 0.92))
+    ax = fig.add_subplot(111)
+    fig.subplots_adjust(left=0.22, right=0.98, top=0.86, bottom=0.24)
+
+    for i in range(n):
+        for j in range(n):
+            c = counts[i][j]
+            # Only a cell that can actually misfire is graded: a tile's two ends against each
+            # other, or the diagonal, an end against its own reverse complement (scored on its
+            # own scale, see checks/overhangs.self_risk). Two different tiles are assembled in
+            # separate tubes, so their cell carries the count and no verdict.
+            together = ends[i].reaction == ends[j].reaction
+            graded = together or i == j
+            risk = (self_risk(c, width) if i == j else risk_of(c, width)) if graded else None
+            ax.add_patch(_rect(
+                j - 0.5, i - 0.5, 1, 1, linewidth=1.2, edgecolor="white",
+                facecolor=_RISK_COLOURS[risk] if graded else _CROSS_COLOUR,
+            ))
+            ax.text(j, i, str(c), ha="center", va="center", fontsize=8,
+                    color="white" if risk == "collision" else "#22303C",
+                    alpha=1.0 if graded else 0.35,
+                    weight="bold" if risk in ("high", "collision") else "normal")
+            # Box the pairs that share a tube, which is what the eye should go to.
+            if i != j and together:
+                ax.add_patch(_rect(j - 0.5, i - 0.5, 1, 1, fill=False,
+                                   edgecolor="#22303C", linewidth=1.6))
+
+    labels = [f"{e.label}  {e.seq}" for e in ends]
+    ax.set_xticks(range(n))
+    ax.set_yticks(range(n))
+    ax.set_xticklabels(labels, rotation=90, fontsize=7, family="monospace")
+    ax.set_yticklabels(labels, fontsize=7, family="monospace")
+    ax.set_xlim(-0.5, n - 0.5)
+    ax.set_ylim(n - 0.5, -0.5)
+    ax.set_aspect("equal")
+    for s in ax.spines.values():
+        s.set_visible(False)
+    ax.tick_params(length=0)
+    ax.set_title(
+        f"Overhang homology, {library.spec.name}\nbases shared out of {width}, "
+        f"worse orientation; boxed pairs share a reaction",
+        loc="left", fontsize=9,
+    )
+
+    from matplotlib.patches import Patch
+
+    tiers = [("ok", f"≤ {MAX_SHARED} shared"), ("watch", "above target"),
+             ("high", f"{width - 1} shared, one mismatch"), ("collision", "identical")]
+    handles = [Patch(facecolor=_RISK_COLOURS[k], label=v) for k, v in tiers]
+    handles.append(Patch(facecolor=_CROSS_COLOUR, edgecolor="#DDE2E6",
+                         label="separate reactions, not graded"))
+    # On the figure rather than the axes, so the rotated tick labels above it do not push
+    # it off the canvas as the overhang count grows.
+    fig.legend(
+        handles=handles,
+        loc="lower center", bbox_to_anchor=(0.5, 0.005), ncol=3, frameon=False, fontsize=7.5,
+    )
+    return fig
+
+
+def _rect(x, y, w, h, **kwargs):
+    from matplotlib.patches import Rectangle
+
+    return Rectangle((x, y), w, h, **kwargs)

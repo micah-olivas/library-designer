@@ -30,6 +30,16 @@ from .motifs import count_enzyme_sites
 from .translation import translates_to
 
 
+def _names(items: list[str], limit: int = 4) -> str:
+    """The offending members in parentheses, e.g. ``" (I7F, S8Y, and 3 more)"``, or an
+    empty string when the list is empty. Named inline so a failure costs one line, not two."""
+    if not items:
+        return ""
+    extra = len(items) - limit
+    shown = ", ".join(items[:limit])
+    return f" ({shown}, and {extra} more)" if extra > 0 else f" ({shown})"
+
+
 @dataclass
 class CheckReport:
     """What QC found, one field per check. Printing it gives the readable report.
@@ -51,6 +61,12 @@ class CheckReport:
     treating it as a failure, because the user opted into that sequence. It comes from the
     same two branches as ``overhang_issues``, so a library with neither tiles nor a starting
     vector has no advisories to report.
+
+    ``overhang_advisories`` is informational for the same reason. It names overhang pairs
+    that share more homology than the design should carry without being an outright
+    collision, which is a hazard worth reading and not a verdict, since the overhangs come
+    off the CDS rather than from an orthogonal set. ``lib.overhang_pairs()`` is the full
+    table behind it.
     """
 
     n_variants: int
@@ -78,6 +94,9 @@ class CheckReport:
     # Informational only, does NOT fail the report: things kept verbatim from a chosen
     # reference (SD sites, motifs, a native BsaI) that the user opted into, not recoded.
     reference_advisories: list[str] = field(default_factory=list)
+    # Informational only: overhang pairs that share more homology than they should without
+    # being an outright collision. See checks/overhangs.py and lib.overhang_pairs().
+    overhang_advisories: list[str] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
@@ -105,30 +124,39 @@ class CheckReport:
             and self.assembly_correct == self.assembly_checked
         )
 
-    def __str__(self) -> str:
-        lines = [
-            f"QC report: {self.n_variants} variants, "
-            + ("PASS" if self.passed else "FAIL")
-        ]
+    def text(self, count: bool = True) -> str:
+        """The readable report. ``count`` prints the variant count in the header, which
+        ``LibrarySummary`` turns off because its own first line already gives it."""
+        head = "QC report: " + (f"{self.n_variants} variants, " if count else "")
+        lines = [head + ("PASS" if self.passed else "FAIL")]
         checked = self.n_variants - len(self.optimization_failed)
         if self.optimization_failed:
-            lines.append(f"  optimization: {len(self.optimization_failed)} failed")
-            lines.append("    x " + ", ".join(self.optimization_failed[:5]))
+            lines.append(f"  optimization: {len(self.optimization_failed)} failed{_names(self.optimization_failed)}")
         ok = checked - len(self.translation_fail)
-        lines.append(f"  translation round-trip: {ok}/{checked} ok")
-        if self.translation_fail:
-            lines.append("    x " + ", ".join(self.translation_fail[:5]))
+        lines.append(f"  translation round-trip: {ok}/{checked} ok{_names(self.translation_fail)}")
+        # Name the sites that were hit, and collapse the clean ones into one line rather
+        # than a "no hit(s)" line each, which on a passing library is most of the report.
+        clean: list[str] = []
         for enz, hits in self.enzyme_hits.items():
-            lines.append(f"  {enz} site: {len(hits) or 'no'} hit(s)")
             if hits:
-                lines.append("    x " + ", ".join(hits[:5]))
+                lines.append(f"  {enz} site: {len(hits)} hit(s){_names(hits)}")
+            else:
+                clean.append(enz)
+        clean_motifs = 0
         for pat, hits in self.motif_hits.items():
-            lines.append(f"  motif /{pat}/: {len(hits) or 'no'} hit(s)")
             if hits:
-                lines.append("    x " + ", ".join(hits[:5]))
+                lines.append(f"  motif /{pat}/: {len(hits)} hit(s){_names(hits)}")
+            else:
+                clean_motifs += 1
+        if clean or clean_motifs:
+            motifs = f"{clean_motifs} motif" + ("s" if clean_motifs > 1 else "")
+            what = clean + ([motifs] if clean_motifs else [])
+            lines.append("  no forbidden sequences (checked " + ", ".join(what) + ")")
         if self.length_exceeded:
-            lines.append(f"  length: {len(self.length_exceeded)} over max_oligo_length")
-            lines.append("    x " + ", ".join(self.length_exceeded[:5]))
+            lines.append(
+                f"  length: {len(self.length_exceeded)} over max_oligo_length"
+                f"{_names(self.length_exceeded)}"
+            )
         for label, hits in (
             ("oligo extra enzyme site(s)", self.oligo_extra_sites),
             ("oligo over budget", self.oligo_over_budget),
@@ -139,8 +167,7 @@ class CheckReport:
             ("assembly issue(s)", self.assembly_issues),
         ):
             if hits:
-                lines.append(f"  {label}: {len(hits)}")
-                lines.append("    x " + ", ".join(hits[:5]))
+                lines.append(f"  {label}: {len(hits)}{_names(hits)}")
         if self.assembly_checked:
             lines.append(
                 f"  assembly simulation: {self.assembly_correct}/{self.assembly_checked} "
@@ -151,11 +178,17 @@ class CheckReport:
                     f"  aligned to the parent vector: {self.assembly_aligned}/{self.assembly_checked} "
                     "differ only at the intended codon"
                 )
-        if self.reference_advisories:
-            lines.append(f"  advisories (informational, not a failure): {len(self.reference_advisories)}")
-            for msg in self.reference_advisories[:5]:
+        advisories = self.reference_advisories + self.overhang_advisories
+        if advisories:
+            lines.append(f"  advisories (not failures): {len(advisories)}")
+            for msg in advisories[:5]:
                 lines.append("    - " + msg)
+            if len(advisories) > 5:
+                lines.append(f"    ... and {len(advisories) - 5} more")
         return "\n".join(lines)
+
+    def __str__(self) -> str:
+        return self.text()
 
 
 def verbatim_advisories(spec, reference: str) -> list[str]:
@@ -245,6 +278,7 @@ def check_library(library) -> CheckReport:
         report.unplaced = t["unplaced"]
         report.vector_extra_sites = t["vector_extra_sites"]
         report.reference_advisories = t["reference_advisories"]
+        report.overhang_advisories = t["overhang_advisories"]
     elif spec.vector is not None and getattr(library, "reference", None):
         # A standard library cloned into a real plasmid: check the adaptors against it.
         from .vector import check_vector
@@ -254,6 +288,7 @@ def check_library(library) -> CheckReport:
         report.overhang_issues = v["overhang_issues"]
         report.vector_extra_sites = v["vector_extra_sites"]
         report.reference_advisories = v["advisories"]
+        report.overhang_advisories = v["overhang_advisories"]
 
     # Then put the design together: digest, ligate, and align the product against the
     # parent. Needs something to assemble into, so a library with no destination vector

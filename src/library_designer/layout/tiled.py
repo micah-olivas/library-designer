@@ -4,7 +4,7 @@ Given a frozen WT reference and its stamped variants (see ``optimize/backbone.py
 split the CDS into overlapping tile windows sized to the oligo budget, assign each
 variant to the tile that contains its codon, and assemble the final synthesis oligo:
 
-    fwd · SITE · spacer5 · [overhang5] · TILE · [overhang3] · spacer3 · SITE_rc · revcomp(rev)
+    fwd · [pad5] · SITE · spacer5 · [overhang5] · TILE · [overhang3] · spacer3 · SITE_rc · [pad3] · revcomp(rev)
 
 The two ``SITE`` copies are the Golden Gate (Type IIS) recognition sequences; after
 digestion the two overhang regions (drawn from the flanking WT CDS) become the fused
@@ -16,6 +16,12 @@ Two site copies are the *only* recognition sites allowed in the oligo. Because a
 the flanking primers/sites/spacers can create an unintended site spanning a junction,
 assembly is screened on the *fully assembled* oligo, and pooled primers that would form
 a junction site are skipped during assignment.
+
+``pad5`` / ``pad3`` are empty unless ``tiled.pad_oligos`` is set. Tiles differ in size, so
+without them the pool holds oligos of several lengths, and moving the boundaries for better
+overhangs (``layout/boundaries.py``) widens that spread. The filler brings every oligo to one
+length. It sits outside both recognition sites, so it is amplified with the oligo and then
+cut away, and nothing padded reaches the assembled plasmid.
 """
 from __future__ import annotations
 
@@ -50,6 +56,11 @@ class TileInfo:
     that whole CDS region put back into the backbone. ``topology`` is ``"circular"``
     when the vector is a real plasmid backbone and ``"linear"`` when there is none, and
     it is what tells QC whether to scan the vector across its origin.
+
+    ``pad_5`` and ``pad_3`` are filler that brings this tile's oligo up to the pool's common
+    length, empty unless ``tiled.pad_oligos`` is set. They sit between the primer and the
+    recognition site at each end, which is outside everything the enzyme keeps, so the
+    digest cuts them away and nothing padded reaches the assembled product.
     """
 
     index: int
@@ -62,6 +73,19 @@ class TileInfo:
     vector: str         # destination vector: the backbone (or, with no starting vector, the CDS
                         # region alone) with this window replaced by the drop-out insert
     topology: str = "linear"   # "circular" for a real plasmid backbone, else "linear"
+    pad_5: str = ""     # filler between the forward primer and the 5' recognition site
+    pad_3: str = ""     # filler between the 3' recognition site and the reverse primer
+
+    @property
+    def lead(self) -> str:
+        """Everything 5' of the recognition site: the forward primer and its pad."""
+        return self.fwd + self.pad_5
+
+    @property
+    def trail(self) -> str:
+        """Everything 3' of the recognition site: the pad and the reverse primer as it sits
+        on the oligo (reverse-complemented)."""
+        return self.pad_3 + reverse_complement(self.rev)
 
 
 def _overhead(params: TiledAssemblyParams, rec_len: int) -> int:
@@ -73,6 +97,38 @@ def _overhead(params: TiledAssemblyParams, rec_len: int) -> int:
         + len(params.spacer_3)
         + 2 * params.overhang_len
     )
+
+
+def max_tile_codons(params: TiledAssemblyParams) -> int:
+    """The longest tile the oligo budget allows, in codons. ``tile_size`` caps it directly
+    when set, otherwise it is what the budget leaves after the primers, sites, spacers, and
+    overhangs."""
+    rec_len = len(ENZYME_SITES[params.enzyme])
+    max_tile = params.tile_size or (params.oligo_budget - _overhead(params, rec_len))
+    codons = max_tile // 3
+    if codons < 1:
+        raise ValueError(
+            f"Oligo budget ({params.oligo_budget} bp) leaves no room for a tile after "
+            f"primers and sites (needs > {_overhead(params, rec_len)} bp)."
+        )
+    return codons
+
+
+def tile_windows(reference: str, params: TiledAssemblyParams) -> list[tuple[int, int]]:
+    """The tile windows a library is laid out with.
+
+    The balanced split from ``compute_tiles``, or, with ``tiled.optimize_overhangs`` set, the
+    boundary positions whose fused overhangs share the least homology (see
+    ``layout/boundaries.py``). The search keeps the tile count and every constraint the
+    balanced split obeys, and falls back to it whenever it cannot do better, so switching the
+    flag on never costs a design anything but the boundaries moving.
+    """
+    baseline = compute_tiles(len(reference), params)
+    if not params.optimize_overhangs:
+        return baseline
+    from .boundaries import search_windows
+
+    return search_windows(reference, params, baseline, max_tile_codons(params))
 
 
 def compute_tiles(cds_len: int, params: TiledAssemblyParams) -> list[tuple[int, int]]:
@@ -87,17 +143,10 @@ def compute_tiles(cds_len: int, params: TiledAssemblyParams) -> list[tuple[int, 
     """
     if cds_len % 3 != 0:
         raise ValueError(f"Reference CDS length ({cds_len}) is not a multiple of 3.")
-    rec_len = len(ENZYME_SITES[params.enzyme])
-    max_tile = params.tile_size or (params.oligo_budget - _overhead(params, rec_len))
-    max_tile_codons = max_tile // 3
-    if max_tile_codons < 1:
-        raise ValueError(
-            f"Oligo budget ({params.oligo_budget} bp) leaves no room for a tile after "
-            f"primers and sites (needs > {_overhead(params, rec_len)} bp)."
-        )
+    max_codons = max_tile_codons(params)
 
     codons = cds_len // 3
-    tile_n = -(-codons // max_tile_codons)          # ceil: fewest tiles that fit the budget
+    tile_n = -(-codons // max_codons)               # ceil: fewest tiles that fit the budget
     # Spread the codons as evenly as the count allows: the first `wide` tiles take one
     # extra codon. Repeating a ceil-sized window instead would leave the remainder in the
     # last tile, which for some CDS lengths is a stub too short to carry an overhang.
@@ -169,28 +218,98 @@ def _check_primer_length(primer_set: PrimerSet, params: TiledAssemblyParams) -> 
         )
 
 
+# Filler for length padding: no BsaI or BsmBI site on either strand, no run longer than two,
+# and an even base mix, so a slice of it can sit next to a recognition site without becoming
+# part of one. `_pad` still checks, and slides along the filler when a junction goes wrong.
+_FILLER = ("TAGCATCAGTTACGCATGACTAGCTTACGATCAGCATTGACGTACTAGCATGTCAGTACGT"
+           "ATCGTTACGCATGCTAAGCTAGTCATGCGTAACTGATGCTAGTACGTCAATGCTAGTACG")
+
+
+def _pad(n: int, before: str, after: str, enzyme: str) -> str:
+    """``n`` filler bases to sit between ``before`` and ``after`` without completing a site.
+
+    Slides a window along ``_FILLER`` until the junction it makes is clean, so the choice is
+    deterministic and the same design always pads the same way. Falls back to the first
+    window if nothing is clean, since ``check()`` reports the site either way and a silent
+    length mismatch would be worse."""
+    if n <= 0:
+        return ""
+    rec = ENZYME_SITES[enzyme].upper()
+    rec_rc = reverse_complement(rec)
+    doubled = _FILLER * (n // len(_FILLER) + 2)
+    for offset in range(len(_FILLER)):
+        pad = doubled[offset:offset + n]
+        window = before[-(len(rec) - 1):] + pad + after[:len(rec) - 1]
+        if rec not in window and rec_rc not in window:
+            return pad
+    return doubled[:n]
+
+
+def pad_target(windows: list[tuple[int, int]], params: TiledAssemblyParams) -> int | None:
+    """The one length every oligo in the pool is brought up to, or None when padding is off.
+
+    ``tiled.pad_target`` sets it outright. Otherwise it is the longest oligo the layout
+    already produces, which evens the pool out without making any oligo longer than it had to
+    be. A target the budget cannot hold is refused rather than silently exceeded."""
+    if not params.pad_oligos:
+        return None
+    overhead = _overhead(params, len(ENZYME_SITES[params.enzyme]))
+    longest = overhead + max(e - s for s, e in windows)
+    target = params.pad_target or longest
+    if target < longest:
+        raise ValueError(
+            f"tiled.pad_target is {target} bp but the longest oligo this layout needs is "
+            f"{longest} bp, so it cannot be padded down. Raise pad_target, or lower "
+            "tiled.tile_size / tiled.oligo_budget to use shorter tiles."
+        )
+    if target > params.oligo_budget:
+        raise ValueError(
+            f"tiled.pad_target is {target} bp, past the {params.oligo_budget} bp oligo "
+            "budget. Raise tiled.oligo_budget or lower pad_target."
+        )
+    return target
+
+
+def pad_lengths(tile_len: int, params: TiledAssemblyParams,
+                target: int | None) -> tuple[int, int]:
+    """How many filler bases each end of one tile's oligo takes to reach ``target``.
+
+    Split as evenly as the shortfall allows, the odd base going to the 5' end."""
+    if target is None:
+        return 0, 0
+    short = target - (_overhead(params, len(ENZYME_SITES[params.enzyme])) + tile_len)
+    if short <= 0:
+        return 0, 0
+    return short - short // 2, short // 2
+
+
 def assemble_oligo(reference: str, variant_cds: str, start: int, end: int,
-                   fwd: str, rev: str, params: TiledAssemblyParams) -> str:
-    """The full synthesis oligo for one variant/tile (all uppercase)."""
+                   fwd: str, rev: str, params: TiledAssemblyParams,
+                   pad_5: str = "", pad_3: str = "") -> str:
+    """The full synthesis oligo for one variant/tile (all uppercase).
+
+    ``pad_5`` / ``pad_3`` are optional filler that evens the pool out to one length. They go
+    between each primer and the recognition site beside it, outside the region the enzyme
+    releases."""
     rec = ENZYME_SITES[params.enzyme].upper()
     rec_rc = reverse_complement(rec)
     ctx5, ctx3 = tile_contexts(reference, start, end, params)
     tile = variant_cds[start:end]
     return (
-        fwd + rec + params.spacer_5 + ctx5
+        fwd + pad_5 + rec + params.spacer_5 + ctx5
         + tile
-        + ctx3 + params.spacer_3 + rec_rc + reverse_complement(rev)
+        + ctx3 + params.spacer_3 + rec_rc + pad_3 + reverse_complement(rev)
     )
 
 
 def wt_oligo(reference: str, tile: TileInfo, params: TiledAssemblyParams) -> str:
     """The WT control oligo for one tile: that tile's window taken straight from the frozen
-    reference, carrying the same primers, sites, and overhangs as the tile's mutants.
+    reference, carrying the same primers, sites, overhangs, and padding as the tile's mutants.
 
     This is also the molecule the assembly simulation digests to work out what a clean
     reaction yields for the tile, so the control that ships is the one QC reasons about."""
     return assemble_oligo(reference, reference, tile.start, tile.end,
-                          tile.fwd, tile.rev, params)
+                          tile.fwd, tile.rev, params, tile.pad_5, tile.pad_3)
 
 
 _MUT_COLS = ("position", "wt_residue", "mut_residue", "codon", "mut_index")
@@ -236,9 +355,12 @@ def site_positions(oligo: str, enzyme: str) -> tuple[list[int], list[int]]:
     return _find(rec), _find(rec_rc)
 
 
-def extra_sites(oligo: str, fwd_len: int, rev_len: int, enzyme: str) -> bool:
-    """True if the oligo carries any recognition site beyond the two intended ones
-    (forward site right after the fwd primer; reverse site right before the rev primer).
+def extra_sites(oligo: str, lead_len: int, trail_len: int, enzyme: str) -> bool:
+    """True if the oligo carries any recognition site beyond the two intended ones.
+
+    ``lead_len`` is everything before the forward site (the primer, plus the pad when the
+    pool is evened out to one length) and ``trail_len`` everything after the reverse site,
+    which is what puts the two intended positions where they belong.
 
     For a palindromic site both intended positions show up on both strands, so compare
     the combined set of positions instead of each strand's list. No enzyme in
@@ -246,8 +368,8 @@ def extra_sites(oligo: str, fwd_len: int, rev_len: int, enzyme: str) -> bool:
     rec = ENZYME_SITES[enzyme].upper()
     rec_len = len(rec)
     fwd_hits, rev_hits = site_positions(oligo, enzyme)
-    want_fwd = fwd_len
-    want_rev = len(oligo) - rev_len - rec_len
+    want_fwd = lead_len
+    want_rev = len(oligo) - trail_len - rec_len
     if rec == reverse_complement(rec):
         return set(fwd_hits) | set(rev_hits) != {want_fwd, want_rev}
     return fwd_hits != [want_fwd] or rev_hits != [want_rev]
@@ -258,37 +380,52 @@ def _count_sites(s: str, enzyme: str) -> tuple[int, int]:
     return len(fwd), len(rev)
 
 
-def _end5_ok(fwd: str, ctx5: str, params: TiledAssemblyParams) -> bool:
-    """The forward primer must add no site to the 5' region (fwd|site|spacer|overhang)
+def _end5_ok(fwd: str, ctx5: str, params: TiledAssemblyParams, pad_5: str = "") -> bool:
+    """The forward primer must add no site to the 5' region (fwd|pad|site|spacer|overhang)
     beyond the one intended forward site."""
     rec = ENZYME_SITES[params.enzyme].upper()
-    nf, nr = _count_sites(fwd + rec + params.spacer_5 + ctx5, params.enzyme)
+    nf, nr = _count_sites(fwd + pad_5 + rec + params.spacer_5 + ctx5, params.enzyme)
     return nf == 1 and nr == 0
 
 
-def _end3_ok(rev: str, ctx3: str, params: TiledAssemblyParams) -> bool:
-    """The reverse primer must add no site to the 3' region (overhang|spacer|site|rev)
+def _end3_ok(rev: str, ctx3: str, params: TiledAssemblyParams, pad_3: str = "") -> bool:
+    """The reverse primer must add no site to the 3' region (overhang|spacer|site|pad|rev)
     beyond the one intended reverse site."""
     rec_rc = reverse_complement(ENZYME_SITES[params.enzyme].upper())
-    nf, nr = _count_sites(ctx3 + params.spacer_3 + rec_rc + reverse_complement(rev), params.enzyme)
+    nf, nr = _count_sites(
+        ctx3 + params.spacer_3 + rec_rc + pad_3 + reverse_complement(rev), params.enzyme
+    )
     return nf == 0 and nr == 1
 
 
-def _assign_primers(tiles: list[tuple[int, int]], reference: str,
-                    primer_set: PrimerSet, params: TiledAssemblyParams) -> list[tuple[str, str, str, str]]:
-    """Choose (fwd_id, fwd, rev_id, rev) per tile. A pool is drawn primer-by-primer,
-    skipping any that would form a junction site; a paired set is used as given.
+def _assign_primers(tiles: list[tuple[int, int]], reference: str, primer_set: PrimerSet,
+                    params: TiledAssemblyParams,
+                    target: int | None = None) -> list[tuple[str, str, str, str, str, str]]:
+    """Choose (fwd_id, fwd, rev_id, rev, pad_5, pad_3) per tile. A pool is drawn
+    primer-by-primer, skipping any that would form a junction site; a paired set is used as
+    given.
 
-    The 5' and 3' junctions are independent (each involves only its own primer, site,
-    spacer, and overhang), so the two ends are validated separately."""
+    The 5' and 3' junctions are independent (each involves only its own primer, pad, site,
+    spacer, and overhang), so the two ends are validated separately. A pad's length is fixed
+    by the tile before any primer is picked, but its bases sit against the primer, so the pad
+    is built per candidate and the junction judged with it in place."""
     n = len(tiles)
     if primer_set.capacity < n:
         raise ValueError(
             f"Primer set {primer_set.name!r} supplies {primer_set.capacity} tile(s) of primers "
             f"but the CDS needs {n}. Provide a larger set (tiled.primer_set=<path>)."
         )
+    rec = ENZYME_SITES[params.enzyme].upper()
+    rec_rc = reverse_complement(rec)
+    pads = [pad_lengths(e - s, params, target) for s, e in tiles]
+
     if primer_set.kind == "paired":
-        return [(pid, fwd, pid, rev) for pid, fwd, rev in primer_set.pairs[:n]]
+        out = []
+        for (pid, fwd, rev), (n5, n3) in zip(primer_set.pairs[:n], pads):
+            out.append((pid, fwd, pid, rev,
+                        _pad(n5, fwd, rec, params.enzyme),
+                        _pad(n3, rec_rc, reverse_complement(rev), params.enzyme)))
+        return out
 
     pool = list(primer_set.primers)
     cursor = 0
@@ -305,12 +442,17 @@ def _assign_primers(tiles: list[tuple[int, int]], reference: str,
             "sites; provide a larger primer set (tiled.primer_set=<path>)."
         )
 
-    out: list[tuple[str, str, str, str]] = []
-    for start, end in tiles:
+    out = []
+    for (start, end), (n5, n3) in zip(tiles, pads):
         ctx5, ctx3 = tile_contexts(reference, start, end, params)
-        fid, fwd = draw(lambda s: _end5_ok(s, ctx5, params))
-        rid, rev = draw(lambda s: _end3_ok(s, ctx3, params))
-        out.append((fid, fwd, rid, rev))
+        fid, fwd = draw(lambda s: _end5_ok(s, ctx5, params, _pad(n5, s, rec, params.enzyme)))
+        rid, rev = draw(
+            lambda s: _end3_ok(s, ctx3, params,
+                               _pad(n3, rec_rc, reverse_complement(s), params.enzyme))
+        )
+        out.append((fid, fwd, rid, rev,
+                    _pad(n5, fwd, rec, params.enzyme),
+                    _pad(n3, rec_rc, reverse_complement(rev), params.enzyme)))
     return out
 
 
@@ -367,18 +509,32 @@ def tile_library(library, params: TiledAssemblyParams) -> dict:
         params = replace(params, starting_vector=vec.path,
                          vector_context_5=term5, vector_context_3=term3)
 
-    tiles_coords = compute_tiles(len(reference), params)
+    from .boundaries import windows_cost
+
+    tiles_coords = tile_windows(reference, params)
+    # Both scores, so the design record says what the boundaries cost and what they would
+    # have cost on the balanced split, whether or not the search ran.
+    balanced = compute_tiles(len(reference), params)
+    overhang_cost = windows_cost(reference, params, tiles_coords)
+    overhang_cost_unsearched = (
+        overhang_cost if tiles_coords == balanced
+        else windows_cost(reference, params, balanced)
+    )
     primer_set = load_primer_set(params.primer_set, params.enzyme)
     _check_primer_length(primer_set, params)
-    assignments = _assign_primers(tiles_coords, reference, primer_set, params)
+    # One length for the whole pool, when asked for. Fixed before the primers are drawn,
+    # since a pad's length follows from the tile and only its bases follow from the primer.
+    target = pad_target(tiles_coords, params)
+    assignments = _assign_primers(tiles_coords, reference, primer_set, params, target)
 
     topology = dest.topology if dest is not None else "linear"
     tiles = []
-    for i, ((s, e), (fid, fwd, rid, rev)) in enumerate(zip(tiles_coords, assignments)):
+    for i, ((s, e), (fid, fwd, rid, rev, p5, p3)) in enumerate(zip(tiles_coords, assignments)):
         cds_region = reference[:s] + params.vector_insert + reference[e:]
         vector = assemble_vector(dest, cds_region) if dest is not None else cds_region
         tiles.append(TileInfo(index=i, start=s, end=e, fwd_id=fid, fwd=fwd,
-                              rev_id=rid, rev=rev, vector=vector, topology=topology))
+                              rev_id=rid, rev=rev, vector=vector, topology=topology,
+                              pad_5=p5, pad_3=p3))
 
     # The whole destination vector runs through the enzyme at assembly, so a stray site
     # anywhere (backbone, CDS arms, or a splice junction) breaks it. When the user chose
@@ -415,7 +571,8 @@ def tile_library(library, params: TiledAssemblyParams) -> dict:
             unplaced.append(str(name))
             continue
         t = tiles[ti]
-        oligo_col.append(assemble_oligo(reference, str(dna), t.start, t.end, t.fwd, t.rev, params))
+        oligo_col.append(assemble_oligo(reference, str(dna), t.start, t.end,
+                                        t.fwd, t.rev, params, t.pad_5, t.pad_3))
         tile_col.append(ti)
 
     wt_controls = None
@@ -432,4 +589,6 @@ def tile_library(library, params: TiledAssemblyParams) -> dict:
         "vector_extra_sites": vector_extra,
         "wt_controls": wt_controls,   # extra rows to append, one WT member per tile
         "params": params,     # resolved (vector-derived terminal overhangs filled in)
+        "overhang_cost": overhang_cost,
+        "overhang_cost_unsearched": overhang_cost_unsearched,
     }

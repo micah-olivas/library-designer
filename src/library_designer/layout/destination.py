@@ -207,7 +207,7 @@ class DestinationVector:
         return f"<pre style='margin:0;line-height:1.4'>{escape(str(self))}</pre>"
 
 
-def build_destination(library) -> DestinationVector:
+def build_destination(library, strict: bool = True) -> DestinationVector:
     """Build the destination vector for a standard (untiled) library.
 
     Needs a starting vector on the spec and a codon-optimized reference. The drop-out
@@ -215,6 +215,13 @@ def build_destination(library) -> DestinationVector:
     carries; with no usable cut in the adaptors the whole CDS drops out and the overhangs
     come from the backbone flanking the insert. Raises when the adaptors ask for something
     the plasmid cannot present.
+
+    It also raises when the two overhangs the cut vector would present collide, meaning they
+    are identical, complementary, or palindromic. That is a property of the plasmid and the
+    adaptors rather than of the library, so no amount of recoding fixes it and the reaction
+    has no correct product to give. ``strict=False`` builds the vector anyway, which is what
+    QC uses so it can report the collision alongside everything else instead of stopping at
+    it.
     """
     spec = library.spec
     if getattr(library, "tiles", None) is not None:
@@ -268,14 +275,35 @@ def build_destination(library) -> DestinationVector:
     # even when the reference was codon-optimized away from the plasmid's own sequence.
     cds_region = reference[:s] + vec.vector_insert.upper() + reference[e:]
     flank_5, flank_3 = flanks(dest, keep_5, keep_3)
+    overhang_5 = flank_5 + reference[:s]
+    overhang_3 = reference[e:] + flank_3
+
+    # The pair the cut vector presents comes out of the plasmid and the adaptors, so a
+    # collision here cannot be recoded away and leaves the reaction with no correct product.
+    # Stop rather than hand back a vector that will re-close empty or take the insert
+    # backwards. QC passes strict=False so it can report this next to its other findings.
+    if strict:
+        from ..checks.overhangs import OverhangEnd, findings_for
+
+        collisions = findings_for([OverhangEnd("insert", "5'", overhang_5),
+                                   OverhangEnd("insert", "3'", overhang_3)])[0]
+        if collisions:
+            raise ValueError(
+                "the cut destination vector would present overhangs that collide, so the "
+                "Golden Gate reaction has no correct product: " + "; ".join(collisions)
+                + ". Move the insert site, or change the adaptors so each end takes its "
+                "overhang from different flanking bases. Pass strict=False to build the "
+                "vector anyway and see the full report."
+            )
+
     return DestinationVector(
         sequence=assemble_vector(dest, cds_region),
         topology=dest.topology,
         start=s,
         end=e,
         reference_len=len(reference),
-        overhang_5=flank_5 + reference[:s],
-        overhang_3=reference[e:] + flank_3,
+        overhang_5=overhang_5,
+        overhang_3=overhang_3,
         cut=cut,
         dest=dest,
         issues=issues,
