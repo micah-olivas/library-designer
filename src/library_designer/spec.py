@@ -33,6 +33,30 @@ class CodonOptimizationParams:
     max_random_iters: int = 100_000
 
 
+def optimization_line(params: dict) -> str:
+    """The codon-optimization params on one line, keeping only the ones that shaped the run.
+
+    Takes the params as a dict (``asdict`` of ``CodonOptimizationParams``, or the block
+    read back from a design-specs record) so both ``LibrarySpec`` and ``LibrarySummary``
+    print them the same way. An unset GC bound is left out, and so is the iteration cap
+    under ``use_best_codon``, which picks each codon outright rather than searching.
+    """
+    bits = [str(params.get("species")), str(params.get("method"))]
+    gc_min, gc_max = params.get("gc_min"), params.get("gc_max")
+    if gc_min is not None or gc_max is not None:
+        gc = (
+            f"gc {gc_min}-{gc_max}" if gc_min is not None and gc_max is not None
+            else f"gc min {gc_min}" if gc_min is not None
+            else f"gc max {gc_max}"
+        )
+        if params.get("gc_window"):
+            gc += f" over {params['gc_window']} bp windows"
+        bits.append(gc)
+    if params.get("method") != "use_best_codon" and params.get("max_random_iters"):
+        bits.append(f"{params['max_random_iters']} iters")
+    return ", ".join(bits)
+
+
 @dataclass
 class StartingVectorParams:
     """The destination plasmid the library is cloned into, and how to find the insert site.
@@ -118,6 +142,17 @@ class TiledAssemblyParams:
     primer_set: str = "subramanian2018"  # bundled set name or a path to a primer-set CSV (see primers.py)
     primer_length: int = 20            # per-primer length assumed when sizing tiles to the budget
     tile_size: int | None = None       # override the per-tile window (bp); None means it is derived from the budget
+    # Move the tile boundaries, within the budget, to the positions whose fused overhangs
+    # share the least homology. The overhangs are read off the CDS at the boundaries, so
+    # where a boundary falls is the only handle on them (see layout/boundaries.py). Off by
+    # default, since it changes the windows and so the oligos a design emits.
+    optimize_overhangs: bool = False
+    # Even the pool out to one oligo length. Tiles differ in size, so the oligos do too, and
+    # moving the boundaries for better overhangs widens the spread. The filler goes between
+    # each primer and the recognition site beside it, outside what the enzyme releases, so it
+    # is amplified with the oligo and then cut away (see layout/tiled.py).
+    pad_oligos: bool = False
+    pad_target: int | None = None      # length to pad to; None means the longest oligo the layout needs
     # Add one WT member per tile (``WT_Tile_<i>``), the tile window straight from the
     # reference. Each tile is amplified and assembled on its own, so without these a
     # sublibrary ships with nothing unmutated to normalize against. Set False to order
@@ -344,13 +379,7 @@ class LibrarySpec:
 
     # --- display --------------------------------------------------------
     def _opt_line(self) -> str:
-        o = self.optimization
-        gc = ""
-        if o.gc_min is not None or o.gc_max is not None:
-            gc = f", gc=({o.gc_min}, {o.gc_max})"
-            if o.gc_window:
-                gc += f" window={o.gc_window}"
-        return f"{o.species}, {o.method}, iters={o.max_random_iters}{gc}"
+        return optimization_line(asdict(self.optimization))
 
     def _uniprot_line(self) -> str:
         if not self.uniprot:

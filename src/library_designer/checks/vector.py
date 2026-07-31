@@ -12,8 +12,6 @@ tiling runs per tile.
 """
 from __future__ import annotations
 
-from ..regions import reverse_complement
-
 
 def check_vector(library) -> dict:
     """Destination-vector findings for a standard library, as lists of readable strings.
@@ -35,13 +33,16 @@ def check_vector(library) -> dict:
     no_adaptors = not spec.adaptor_5 and not spec.adaptor_3
 
     try:
-        dv = build_destination(library)
+        # strict=False: an overhang collision is reported below as an overhang issue rather
+        # than swallowing the rest of the checks.
+        dv = build_destination(library, strict=False)
     except ValueError as exc:
         # A geometry or locating problem, reported rather than raised so check() still
         # returns a full report the user can act on.
         return {
             "adaptor_issues": [f"destination vector: {exc}"],
             "overhang_issues": [],
+            "overhang_advisories": [],
             "vector_extra_sites": [],
             "advisories": [],
         }
@@ -59,7 +60,6 @@ def check_vector(library) -> dict:
             f"overhangs ({dv.overhang_5}, {dv.overhang_3}) from the backbone"
         )
         adaptor_issues = []
-    overhang_issues: list[str] = []
     cut = dv.cut
     if cut is not None:
         # The load-bearing check: the oligo's overhangs against the vector's. They differ
@@ -76,17 +76,11 @@ def check_vector(library) -> dict:
                     f"not ligate. Match the adaptor to the plasmid flanking the insert."
                 )
 
-    c5, c3 = dv.overhang_5, dv.overhang_3
-    if c5 == c3:
-        overhang_issues.append(f"insert: both fused overhangs are {c5}, so the insert is not directional")
-    if c5 == reverse_complement(c5):
-        overhang_issues.append(f"insert: the 5' fused overhang {c5} is palindromic, so it can self-ligate")
-    if c3 == reverse_complement(c3):
-        overhang_issues.append(f"insert: the 3' fused overhang {c3} is palindromic, so it can self-ligate")
-    if c5 == reverse_complement(c3):
-        overhang_issues.append(
-            f"insert: the fused overhangs {c5} and {c3} are complementary, so the insert can flip"
-        )
+    # The two fused overhangs against each other, scored on how much homology they share
+    # rather than on exact identity alone (see checks/overhangs.py).
+    from .overhangs import overhang_findings
+
+    overhang_issues, overhang_advisories = overhang_findings(library)
 
     pos = vector_site_positions(dv.sequence, enzyme, dv.topology == "circular")
     vector_extra_sites = (
@@ -96,6 +90,7 @@ def check_vector(library) -> dict:
     return {
         "adaptor_issues": adaptor_issues,
         "overhang_issues": overhang_issues,
+        "overhang_advisories": overhang_advisories,
         "vector_extra_sites": vector_extra_sites,
         "advisories": advisories,
     }

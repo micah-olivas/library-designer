@@ -321,7 +321,10 @@ def _plan(library) -> _Plan | None:
 
         enzyme, o = vec.enzyme, cut_geometry(vec.enzyme)[1]
         try:
-            dv = build_destination(library)
+            # strict=False: an overhang collision is a QC finding of its own (see
+            # checks/overhangs.py), and simulating anyway says concretely what the reaction
+            # does with it rather than replacing every member's result with one message.
+            dv = build_destination(library, strict=False)
         except ValueError as exc:
             return _Plan(reference, enzyme, o, proteins, [],
                          dead=AssemblyResult("destination", enzyme, issues=[str(exc)]))

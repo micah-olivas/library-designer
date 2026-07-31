@@ -16,7 +16,8 @@ see a full workflow and to check that the package works.
   synthesis and for uSort-M.
 - `02-tiled-assembly.ipynb`. Tiled assembly for a CDS longer than one oligo (glucokinase):
   codon-aligned tiles with orthogonal primer pairs, then Golden Gate into per-tile
-  destination vectors.
+  destination vectors. Includes the overhang review, where you check that no two fused
+  overhangs are alike enough to re-close the vector or flip a fragment.
 - `03-omega-sequence-set.ipynb`. A library of independent full-length sequences
   (`examples/example_designs.faa`) built into whole genes from oligopools via
   [OMEGA](https://github.com/RomeroLab/omega). Needs a separately installed OMEGA.

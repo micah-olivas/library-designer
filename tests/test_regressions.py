@@ -59,7 +59,10 @@ def test_an_overhang_split_between_adaptor_and_cds_assembles_correctly(tmp_path)
     a5 = "GGCGC" + "GGTCTC" + "A" + BB5[-2:]        # 2 of the 4 overhang bases
     a3 = BB3[:2] + "T" + rc("GGTCTC") + "GCGCC"
     lib = _standard_lib(_plasmid(tmp_path, CLEAN_CDS), a5, a3)
-    dv = lib.destination_vector()
+    # This fixture's 3' overhang works out to CATG, which is palindromic, so build_destination
+    # refuses it by default. That is a real finding about these two flanks and QC reports it,
+    # but it is not what this test is about, so build the vector anyway.
+    dv = lib.destination_vector(strict=False)
     assert (dv.cut.keep_5, dv.cut.keep_3) == (2, 2)
     assert (dv.start, dv.end) == (2, len(lib.reference) - 2)
 

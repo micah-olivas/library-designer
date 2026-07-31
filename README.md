@@ -110,7 +110,7 @@ lib.to_usortm(out / "variants.csv")                         # name,sequence for 
 lib.to_vendor(out / "order.csv")                            # order form, method taken from spec.platform
 lib.to_design_specs(out / "my_library_design_specs.json")   # design record: spec, params, seed, versions
 
-lib.export_all("out")                                       # or all of the above at once, same directory
+lib.export_all("out")                                       # the same set, named for you, plus the QC plot
 ```
 
 Each run writes into its own dated directory, so a re-run cannot overwrite an order you
@@ -123,7 +123,7 @@ path.
 
 By default, `codon_optimize()` optimizes the WT CDS once into a frozen reference (`lib.reference`), then stamps each variant's single codon onto it. This ensures that each library member matches the reference sequence except at its intended position. A variant whose codon can't avoid a forbidden motif is recorded in `lib.failed` and reported by QC instead of aborting the run.
 
-`lib.summary()` returns a `LibrarySummary` with variant counts per sublibrary, the codon-optimization parameters, the adaptor regions and construct length range, the synthesis platform, and the QC report.
+`lib.summary()` returns a `LibrarySummary` with variant counts per sublibrary, the codon-optimization parameters, the adaptor regions and construct length range, the synthesis platform, and the QC report. Printing it keeps only the lines that say something, so an empty adaptor pair, an unset GC bound, and a check that found nothing do not crowd out the ones that need reading. A tiled library shows its tiles and oligo lengths in place of a construct length, since the oligo is what you order.
 
 Substitutions accept amino acids, where the optimizer picks the codon, or literal codons (e.g. `"TAG"`), which are placed verbatim and protected. Codon-optimization parameters (species, method, GC window, iterations) live on `CodonOptimizationParams` and are recorded in `to_design_specs()`, so every order documents how it was generated.
 
@@ -205,6 +205,64 @@ written to GenBank. The base it started at is recorded in the manifest as
 `origin_in_starting_vector`, which is how you relate the emitted coordinates back to the
 plasmid you supplied.
 
+### Overhang specificity
+
+A Golden Gate reaction is only directional if the two fused overhangs it works with tell
+each other apart. When they do not, the cut vector's own ends anneal and it re-closes empty,
+or the fragment goes in the other way round and you clone the tile backwards. QC counts how
+many of the four bases the two share, in both orientations, and checks each against its own
+reverse complement to catch a palindrome. Aim for at most one shared base. A full match
+fails the report; a single mismatch is an advisory, because a tiled design reads its
+overhangs off the coding sequence at the tile boundaries rather than picking them from an
+orthogonal set.
+
+The unit of concern is one tile. Each is amplified out of the pool with its own primer pair
+and assembled into the vector built around its own window, so a tile's reaction holds its
+own fragments and nothing else. Tile 0's overhangs and tile 3's never meet, and they cannot
+be pooled either, since every tile needs the particular vector that drops out its own
+window. So the comparisons that mean anything are a tile's two ends against each other and
+each end against its own reverse complement.
+
+```python
+lib.overhangs()                     # one row per fused overhang
+lib.overhang_pairs()                # one row per tile, worst first
+lib.overhang_pairs(all_pairs=True)  # cross-tile rows too, listed but ungraded
+lib.plot_overhangs()                # the same as a matrix
+```
+
+On an untiled library the pair comes from your backbone and your adaptors, so no recoding
+can fix a collision. `destination_vector()` raises rather than hand back a plasmid that
+cannot clone; pass `strict=False` to build it and look anyway.
+
+### Moving the boundaries
+
+A tiled design does not pick its overhangs, so the boundary is the only handle on them. The
+budget caps a tile and the balanced split sits under that cap, which leaves spare codons, and
+every one of them is a boundary that could move. `tiled.optimize_overhangs` searches those
+positions and keeps the layout whose overhangs share the least sequence. The balanced split
+is scored against every candidate and wins ties, so the search can only hold a design steady
+or improve it. It scores only what can misfire, a tile against itself, so the slack is not
+spent on cross-tile homology that never meets. On the bundled glucokinase example the
+balanced split leaves tile4 with two ends one mismatch from complementary, which would let
+that fragment ligate in backwards. The search clears it and leaves five of the six reactions
+at or under target.
+
+Boundaries that move make the tiles uneven, and the oligos with them. `tiled.pad_oligos`
+evens the pool back out to one length with filler between each primer and the recognition
+site beside it. That position is what makes it safe: the pad is outside both sites, so it is
+amplified with the oligo and cut away before anything ligates, and the fragment that reaches
+the vector is byte-identical to the unpadded one. `pad_target` sets the length outright,
+otherwise the pool levels up to the longest oligo the layout already needed.
+
+```python
+tiled = TiledAssemblyParams(oligo_budget=300, optimize_overhangs=True, pad_oligos=True)
+```
+
+Both default to off, so an existing design keeps the boundaries and the oligos it had.
+Turning the search on rewrites every oligo, so re-order the pool rather than mixing layouts.
+`lib.design_specs["tiled"]` records which layout was used and what the overhangs cost either
+way.
+
 ### Assembly simulation
 
 With a destination vector in play, QC stops reading the sequences and starts putting them
@@ -214,7 +272,7 @@ fused overhangs, ligates, and aligns the product against the parent plasmid:
 ```
 QC report: 480 variants, PASS
   translation round-trip: 480/480 ok
-  BsaI site: no hit(s)
+  no forbidden sequences (checked BsaI, 2 motifs)
   assembly simulation: 480/480 members rebuild their intended variant
   aligned to the parent vector: 480/480 differ only at the intended codon
 ```
@@ -269,7 +327,7 @@ from library_designer import LibrarySpec, SubstitutionScan
 
 spec = LibrarySpec.from_toml("my_tiled_spec.toml")   # a CDS with a [tiled] block
 lib = SubstitutionScan(spec).generate().codon_optimize().tile()
-print(lib.summary())                             # per-tile primers and QC, including junction sites
+print(lib.summary())                             # tiles, oligo lengths, and QC, including junction sites
 
 out = lib.run_dir("out")
 lib.to_oligo_pool(out / "oligos.csv")            # the pooled synthesis order (name, sequence)
@@ -331,10 +389,14 @@ The same library serializes several ways.
 | `to_primer_order` | synthesis provider, tiled | per-tile amplification primers (IDT) |
 | `to_vectors` | cloning | the destination vector to build (one row per tile if tiled) |
 | `to_vector_maps` | cloning | annotated GenBank of that vector (needs a starting vector) |
-| `to_assembled_vectors` | sequence verification | the clone every variant assembles into: one annotated GenBank each, a combined FASTA, the parent, and a manifest |
+| `to_assembled_vectors` | sequence verification | the clone every variant assembles into: one annotated GenBank each, a combined FASTA, the parent, and a manifest (standard libraries only) |
 
-`export_all` writes the first four unconditionally, and the last three too whenever a
-starting vector is set. Pass `vectors=False` to leave the cloning outputs out.
+`export_all` always writes `to_full_csv`, `to_vendor`, and `to_design_specs`. A standard
+library also gets `to_usortm`; a tiled one gets `to_oligo_pool` and `to_primer_order` in
+its place, because a tiled pool has no single variable region to write. With a starting
+vector set the cloning outputs come too: `to_vectors` and `to_vector_maps` for either
+kind, and `to_assembled_vectors` for a standard library. Pass `vectors=False` to leave the
+cloning outputs out.
 
 ### The uSort-M handoff
 
