@@ -6,11 +6,23 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from html import escape as _esc
+from pathlib import Path
 
 import pandas as pd
 
 from .checks import CheckReport, check_library
 from .regions import assemble
+from .spec import optimization_line
+
+
+def _bp(lo: int, hi: int) -> str:
+    """``"298 bp"`` for one length, ``"293-296 bp"`` for a range."""
+    return f"{lo} bp" if lo == hi else f"{lo}-{hi} bp"
+
+
+def _short(seq: str, keep: int = 12) -> str:
+    """An adaptor as printed: long ones lose their middle."""
+    return seq if len(seq) <= 2 * keep + 3 else f"{seq[:keep]}...{seq[-keep:]}"
 
 
 @dataclass
@@ -22,8 +34,13 @@ class LibrarySummary:
     A sequence set has no such grouping, since every member is a distinct sequence, so it
     reports a single ``"members"`` bucket instead. ``adaptors`` carries the two sequences
     and their lengths, plus the construct-length range once at least one member has been
-    optimized. ``qc`` is None until ``codon_optimize()`` has run, because there are no
-    sequences to check before that.
+    optimized. ``tiles`` fills in only for a tiled library, where the oligo and not the
+    construct is what gets ordered. ``qc`` is None until ``codon_optimize()`` has run,
+    because there are no sequences to check before that.
+
+    Printing keeps only the lines that say something. An empty adaptor pair, an unset GC
+    window, and a sequence set's single bucket are all left out, and a tiled library shows
+    its oligos in place of a construct length.
 
     Built by ``summarize()``, which is what ``Library.summary()`` calls.
     """
@@ -38,6 +55,7 @@ class LibrarySummary:
     platform: str | None
     qc: CheckReport | None
     starting_vector: str | None = None  # the destination plasmid, when the spec names one
+    tiles: dict | None = None           # tiled layout: tile count, oligo lengths, primer set
 
     @property
     def ok(self) -> bool:
@@ -49,36 +67,57 @@ class LibrarySummary:
         """
         return self.n_failed == 0 and self.qc is not None and self.qc.passed
 
+    def _head(self) -> str:
+        if self.qc is None:                     # codon_optimize() has not run yet
+            state = "not optimized yet"
+        elif self.n_failed:
+            state = f"{self.n_optimized} optimized, {self.n_failed} failed"
+        else:
+            state = "all optimized"
+        return f"Library '{self.name}': {self.n_variants} variants, {state}"
+
+    def _size_line(self) -> str | None:
+        """How long the thing you order is: the oligo for a tiled library, the construct
+        with its adaptors for everything else. None before optimization, when neither is
+        known."""
+        a = self.adaptors
+        if self.tiles:
+            t = self.tiles
+            bits = [f"{t['n_tiles']} over a {t['cds_len']} bp CDS"]
+            if t.get("oligo_len_min"):
+                bits.append(f"oligos {_bp(t['oligo_len_min'], t['oligo_len_max'])}")
+            bits.append(f"primer set {t['primer_set']}")
+            return "  tiles: " + ", ".join(bits)
+        length = (
+            _bp(a["construct_len_min"], a["construct_len_max"])
+            if "construct_len_min" in a
+            else None
+        )
+        if not a["len_5"] and not a["len_3"]:            # nothing to say about adaptors
+            return f"  construct: {length}" if length else None
+        pair = (
+            f"  adaptors: 5' {_short(a['5_prime'])} ({a['len_5']} bp), "
+            f"3' {_short(a['3_prime'])} ({a['len_3']} bp)"
+        )
+        return f"{pair}, construct {length}" if length else pair
+
     def __str__(self) -> str:
-        lines = [
-            f"Library '{self.name}': {self.n_variants} variants "
-            f"({self.n_optimized} optimized, {self.n_failed} failed)"
-        ]
+        lines = [self._head()]
         if self.platform:
             lines.append(f"  platform: {self.platform}")
-        lines.append(
-            "  sublibraries: "
-            + ", ".join(f"{k}={v}" for k, v in self.per_sublibrary.items())
-        )
-        a = self.adaptors
-        crange = (
-            f", construct {a['construct_len_min']}-{a['construct_len_max']} bp"
-            if "construct_len_min" in a
-            else ""
-        )
-        lines.append(
-            f"  adaptors: 5' {a['5_prime']!r} ({a['len_5']} bp), "
-            f"3' {a['3_prime']!r} ({a['len_3']} bp){crange}"
-        )
+        # A sequence set's one bucket just repeats the variant count, so skip it there.
+        if list(self.per_sublibrary) != ["members"]:
+            lines.append(
+                "  sublibraries: "
+                + ", ".join(f"{k}={v}" for k, v in self.per_sublibrary.items())
+            )
+        if (size := self._size_line()) is not None:
+            lines.append(size)
         if self.starting_vector:
-            lines.append(f"  starting vector: {self.starting_vector}")
-        o = self.optimization
-        lines.append(
-            f"  optimization: species={o.get('species')}, method={o.get('method')}, "
-            f"gc=({o.get('gc_min')}, {o.get('gc_max')}), iters={o.get('max_random_iters')}"
-        )
+            lines.append(f"  starting vector: {Path(self.starting_vector).name}")
+        lines.append("  optimization: " + optimization_line(self.optimization))
         if self.qc is not None:
-            lines.append("  " + str(self.qc).replace("\n", "\n  "))
+            lines.append("  " + self.qc.text(count=False).replace("\n", "\n  "))
         return "\n".join(lines)
 
     def __repr__(self) -> str:   # clean plain output instead of the dataclass dump
@@ -121,6 +160,20 @@ def summarize(library) -> LibrarySummary:
         adaptors["construct_len_min"] = min(lengths)
         adaptors["construct_len_max"] = max(lengths)
 
+    # A tiled library orders oligos, not constructs, so report the layout instead of the
+    # (empty) adaptor pair. Lengths come off the df, which only has them once tiled.
+    tiles = None
+    if getattr(library, "tiles", None):
+        params = library.tiled_params
+        oligo_len = df["oligo_length"].dropna() if "oligo_length" in df.columns else pd.Series(dtype=float)
+        tiles = {
+            "n_tiles": len(library.tiles),
+            "cds_len": len(library.reference),
+            "primer_set": params.primer_set,
+            "oligo_len_min": int(oligo_len.min()) if len(oligo_len) else None,
+            "oligo_len_max": int(oligo_len.max()) if len(oligo_len) else None,
+        }
+
     return LibrarySummary(
         name=spec.name,
         n_variants=len(df),
@@ -134,4 +187,5 @@ def summarize(library) -> LibrarySummary:
         starting_vector=(
             vec.path if (vec := spec.resolve_vector(getattr(library, "tiled_params", None))) else None
         ),
+        tiles=tiles,
     )

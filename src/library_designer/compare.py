@@ -54,10 +54,15 @@ class ReferenceComparison:
 
     @property
     def codon_agreement(self) -> float:
+        """Fraction of compared codons that match, 0.0 when there was nothing to compare.
+        Codons are compared position by position with no alignment, so an indel makes
+        everything downstream count as a difference."""
         return self.codon_matches / self.n_codons if self.n_codons else 0.0
 
     @property
     def introduces_sites(self) -> bool:
+        """True when the pasted sequence carries any restricted enzyme site or avoid-motif
+        that our reference was optimized to avoid."""
         return any(self.enzyme_sites.values()) or any(self.motif_hits.values())
 
     def __str__(self) -> str:
