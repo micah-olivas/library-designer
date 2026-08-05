@@ -62,7 +62,7 @@ def check_vector(library) -> dict:
         adaptor_issues = []
     cut = dv.cut
     if cut is not None:
-        # The load-bearing check: the oligo's overhangs against the vector's. They differ
+        # Compare the oligo's overhangs against the vector's. They differ
         # exactly when the adaptor bases that ride along past the cut are not the backbone
         # bases flanking the insert, so name both sequences.
         for end, oligo_ovh, vector_ovh in (

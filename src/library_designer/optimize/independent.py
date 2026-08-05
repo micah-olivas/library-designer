@@ -7,7 +7,7 @@ rules (forbidden motifs, restriction sites, GC window) as everything else, using
 single wrapper in ``optimize/codon.py``.
 
 The backbone-and-stamp model in ``optimize/backbone.py`` is deliberately NOT used
-here. That model exists to keep single-mutant variants byte-identical outside their
+here. That model exists to keep single-mutant variants identical outside their
 one mutated codon, the invariant uSort-M single-mutant mapping depends on.
 Independent members share no such invariant, and forcing one would collapse the set
 onto a single sequence. (This is also why the removed per-variant optimizer was wrong

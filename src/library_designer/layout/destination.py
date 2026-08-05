@@ -4,7 +4,7 @@ A tiled library needs one destination vector per tile (see ``layout/tiled.py``).
 standard library carries the whole CDS on one oligo, so it needs exactly one: the
 starting plasmid with the CDS replaced by a Golden Gate drop-out.
 
-Where that drop-out starts and ends is decided by the adaptors, not by us. The oligo's
+The adaptors decide where the drop-out starts and ends. The oligo's
 Type IIS sites sit in the adaptors, so digesting the oligo leaves a fixed pair of fused
 overhangs, and the cut vector has to present the same two. ``cut_construct`` reads those
 overhangs out of the adaptors, then ``build_destination`` places the drop-out so the
@@ -23,7 +23,10 @@ from pathlib import Path
 
 from ..checks.motifs import ENZYME_SITES, cut_geometry
 from ..regions import reverse_complement
-from .vector_io import DestinationContext, assemble_vector, flanks, locating_kwargs, resolve_destination
+from .vector_io import (
+    DestinationContext, assemble_vector, flanks, locating_kwargs, resolve_destination,
+    widen_locus,
+)
 
 
 def _find_all(hay: str, needle: str) -> list[int]:
@@ -130,6 +133,68 @@ def cut_construct(
         ),
         issues,
     )
+
+
+def adaptor_padding(spec, params=None) -> tuple[int, int]:
+    """Backbone bases each adaptor spells past its fused overhang, as ``(pad_5, pad_3)``.
+
+    An adaptor may end exactly at its overhang, in which case both are 0 and the destination
+    vector gives up nothing but the CDS. An adaptor may also carry a few bases beyond it,
+    which is how a design slides the fused overhang off the CDS/backbone junction and into
+    the backbone. That is the only direction available to a saturating scan, since an
+    overhang drawn from coding bases breaks the variants that mutate them.
+
+    Read off the adaptors and the enzyme geometry alone, so it does not need the reference
+    and every consumer of the locus gets the same answer. Adaptors that do not describe a
+    usable pair of cuts give ``(0, 0)`` and are reported by ``cut_construct`` instead.
+    """
+    vec = spec.resolve_vector(params)
+    if vec is None or not (spec.adaptor_5 or spec.adaptor_3):
+        return 0, 0
+    overhang = cut_geometry(vec.enzyme)[1]
+    # keep_5 / keep_3 depend on the adaptors and the enzyme, not on what sits between them,
+    # so any stand-in variable region gives the real answer.
+    cut, _ = cut_construct(spec.adaptor_5, "", spec.adaptor_3, vec.enzyme)
+    if cut is None:
+        return 0, 0
+    return max(0, cut.keep_5 - overhang), max(0, cut.keep_3 - overhang)
+
+
+def resolve_insert_locus(spec, params=None) -> DestinationContext:
+    """The destination plasmid's insert locus, widened by whatever the adaptors re-supply.
+
+    Every consumer that builds or simulates the destination vector goes through here, so the
+    drop-out, the fused overhangs, and the assembly simulation cannot disagree about where
+    the junction falls. Reference extraction does not, since it wants the coding region on
+    its own (see ``optimize/backbone.build_reference``).
+
+    Padding bases have to match the plasmid, because the oligo supplies them in the product.
+    A mismatch is raised here rather than left to surface as a wrong assembly, and names both
+    sequences, since the fix is to correct the adaptor.
+    """
+    vec = spec.resolve_vector(params)
+    dest = resolve_destination(vec.path, **locating_kwargs(spec, params))
+    pad_5, pad_3 = adaptor_padding(spec, params)
+    if not (pad_5 or pad_3):
+        return dest
+
+    a5, a3 = spec.adaptor_5.upper(), spec.adaptor_3.upper()
+    # The padding sits between the overhang and the CDS: the last pad_5 bases of adaptor_5,
+    # and the first pad_3 of adaptor_3.
+    for label, pad, from_adaptor, from_plasmid in (
+        ("adaptor_5", pad_5, a5[len(a5) - pad_5:] if pad_5 else "",
+         dest.full_seq[dest.start - pad_5:dest.start] if pad_5 else ""),
+        ("adaptor_3", pad_3, a3[:pad_3], dest.full_seq[dest.end:dest.end + pad_3]),
+    ):
+        if pad and from_adaptor != from_plasmid:
+            raise ValueError(
+                f"{label} spells {pad} base(s) past its fused overhang ({from_adaptor}), so "
+                "the destination vector has to give those up, but the plasmid reads "
+                f"{from_plasmid or '(nothing)'} there. The oligo re-supplies whatever the "
+                "vector drops, so these have to be the same bases. Either match the plasmid "
+                f"or trim {label} back to its overhang."
+            )
+    return widen_locus(dest, pad_5, pad_3)
 
 
 @dataclass
@@ -245,7 +310,7 @@ def build_destination(library, strict: bool = True) -> DestinationVector:
     if reference is None:
         raise ValueError("Library is not codon-optimized yet, call codon_optimize() first.")
 
-    dest = resolve_destination(vec.path, **locating_kwargs(spec))
+    dest = resolve_insert_locus(spec)
     overhang = cut_geometry(vec.enzyme)[1]
     cut, issues = cut_construct(spec.adaptor_5, reference, spec.adaptor_3, vec.enzyme)
 
@@ -255,14 +320,10 @@ def build_destination(library, strict: bool = True) -> DestinationVector:
         s, e = 0, len(reference)
         keep_5 = keep_3 = overhang
     else:
-        keep_5, keep_3 = cut.keep_5, cut.keep_3
-        if keep_5 > overhang or keep_3 > overhang:
-            raise ValueError(
-                f"the adaptors keep more bases past the {vec.enzyme} cut ({keep_5} at the 5' "
-                f"end, {keep_3} at the 3') than the {overhang} bp fused overhang, so the "
-                "destination vector would have to give up backbone bases the oligo "
-                "re-supplies. Trim the adaptors so each ends at its overhang."
-            )
+        # Bases past the overhang are backbone the oligo re-supplies, and the locus was
+        # already widened to give them up (see resolve_insert_locus). Relative to that wider
+        # locus each adaptor now ends exactly at its overhang, so clamp and carry on.
+        keep_5, keep_3 = min(cut.keep_5, overhang), min(cut.keep_3, overhang)
         s, e = overhang - keep_5, len(reference) - (overhang - keep_3)
     if e <= s:
         raise ValueError(

@@ -258,7 +258,11 @@ def test_a_sequence_set_exports_without_warning_about_a_plot_it_cannot_draw(tmp_
     with pytest.warns(None) if False else _no_warnings():
         lib.export_all(tmp_path / "out")
     assert (lib.output_dir / "ss_full_library.csv").is_file()
-    assert not list(lib.output_dir.glob("*.png"))
+
+    # The codon map counts across members, which a sequence set has, so it is drawn. The
+    # codon-usage plot needs the one shared reference it has not got, and is skipped
+    # silently rather than warned about on every export.
+    assert [p.name for p in lib.output_dir.glob("*.png")] == ["ss_codon_matrix.png"]
 
     with pytest.raises(ValueError, match="every member is its own gene"):
         lib.plot_codon_usage()

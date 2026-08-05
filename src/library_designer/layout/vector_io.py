@@ -1,6 +1,6 @@
 """Read a destination-plasmid file and work out where the CDS insert goes.
 
-Every library is cloned into something. A standard library drops its one oligo into one
+A standard library drops its one oligo into one
 destination vector (see ``layout/destination.py``); tiled assembly drops each amplified
 sublibrary into its own vector carrying the rest of the CDS (``layout/tiled.py``). To emit
 those as real plasmids rather than a bare CDS cassette, we need the backbone the user
@@ -15,7 +15,7 @@ BioPython reads ``.dna`` but cannot write it, so emitted maps are GenBank.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 
@@ -68,6 +68,11 @@ class DestinationContext:
     source_path: str = ""
     origin: int = 0        # base of full_seq the emitted map starts at (circular only)
     flipped: bool = False  # the file was reverse-complemented to put the CDS on the forward strand
+    # Backbone bases folded into [start, end) by widen_locus because the adaptors re-supply
+    # them. The coding region proper is [start + pad_5, end - pad_3), so a caller placing the
+    # CDS (rather than the drop-out) has to step past pad_5.
+    pad_5: int = 0
+    pad_3: int = 0
 
 
 def _format_for(path: str) -> str:
@@ -119,7 +124,7 @@ def read_vector_file(path: str) -> tuple[str, str, list[Feature]]:
                 break
         # A feature that crosses the file's origin is stored as a join() of two parts, and
         # BioPython reports its span as 0..len(seq), which would read as "the whole molecule".
-        # Flag it so locating can refuse rather than silently swallow the backbone.
+        # Flag it so locating can refuse rather than treat the whole molecule as the insert.
         parts = getattr(f.location, "parts", [f.location])
         features.append(
             Feature(
@@ -244,7 +249,7 @@ def choose_origin(seq: str, features: list[Feature], start: int, end: int, topol
 
     A viewer draws a plasmid map from base 1, so whatever sits at the origin is split
     across the two ends of the map. Starting at the insert cuts the cassette in half right
-    at the Golden Gate sites, the part you actually want to read. So the origin goes
+    at the Golden Gate sites. So the origin goes
     ``upstream`` bases before the promoter that drives the insert, the nearest one 5' of it,
     which leaves promoter and insert intact and in reading order. With no promoter
     annotated we back off the same distance from the insert itself. The result is then
@@ -411,12 +416,60 @@ def origin_in_source(dest: DestinationContext) -> int:
     return (len(dest.full_seq) - i) if dest.flipped else (i + 1)
 
 
+def widen_locus(dest: DestinationContext, pad_5: int, pad_3: int) -> DestinationContext:
+    """The same insert locus with ``pad_5`` / ``pad_3`` backbone bases folded into it.
+
+    Used when an adaptor spells more bases past its Type IIS cut than the fused overhang is
+    long. Those extra bases are backbone, and the oligo carries them, so the destination
+    vector has to give them up or the assembled plasmid would hold them twice. Widening the
+    locus is how that is expressed: every consumer already reads ``start`` and ``end``, so
+    the drop-out, the retained flanks, the fused overhangs, and the simulated assembly all
+    move together and cannot disagree about where the junction is.
+
+    ``located_region`` grows to match, so this is not the context to extract a reference CDS
+    from (see ``use_vector_cds``, which wants the coding region alone).
+    """
+    if not (pad_5 or pad_3):
+        return dest
+    start, end, S = dest.start - pad_5, dest.end + pad_3, dest.full_seq
+    if start < 0 or end > len(S):
+        # The bases exist on a circular plasmid but not at these indices, and rotating the
+        # record here would move every coordinate a caller already holds.
+        raise ValueError(
+            f"the adaptors ask the destination vector to give up {pad_5} base(s) before and "
+            f"{pad_3} after the insert, which runs past the end of the sequence as recorded. "
+            "Re-save the plasmid with the insert further from the start of the file."
+        )
+    # The origin has to be recomputed, not carried over: the old one can sit inside the
+    # locus now, and ``assemble_vector`` reads the map from it, so a stale origin both
+    # rotates the map wrongly and leaves a padding base in the vector that the oligo also
+    # supplies.
+    return replace(dest, start=start, end=end, located_region=S[start:end],
+                   origin=choose_origin(S, dest.features, start, end, dest.topology),
+                   pad_5=pad_5, pad_3=pad_3)
+
+
 def insert_offset(dest: DestinationContext) -> int:
     """Index in the emitted vector where the CDS region begins, so callers can place
-    features on what ``assemble_vector`` returns without redoing the rotation."""
+    features on what ``assemble_vector`` returns without redoing the rotation.
+
+    This is the start of the whole replaced locus. With padding in play the coding region
+    starts ``pad_5`` further in, so use ``parent_region`` to build the matching content and
+    add ``dest.pad_5`` when placing a CDS feature."""
     if dest.topology != "circular":
         return dest.start
     return (dest.start - dest.origin) % len(dest.full_seq)
+
+
+def parent_region(dest: DestinationContext, cds: str) -> str:
+    """What the locus holds in the *starting* plasmid with ``cds`` as its coding region.
+
+    The same as ``cds`` unless the locus was widened, in which case the padding bases the
+    adaptors re-supply belong back on either side. Building a parent from ``cds`` alone
+    would come out short by the padding and every alignment against it would disagree by
+    that much."""
+    S = dest.full_seq
+    return S[dest.start:dest.start + dest.pad_5] + cds + S[dest.end - dest.pad_3:dest.end]
 
 
 def assemble_vector(dest: DestinationContext, cds_region: str) -> str:

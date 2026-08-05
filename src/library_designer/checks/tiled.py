@@ -1,7 +1,7 @@
 """QC specific to tiled-assembly libraries, run in addition to the standard checks.
 
-The load-bearing check is that each assembled oligo carries *exactly* the two intended
-Golden Gate sites and no extras: adding the flanking primers, sites, and spacers can
+Each assembled oligo must carry exactly the two intended Golden Gate sites and no
+extras: adding the flanking primers, sites, and spacers can
 create an unintended recognition site spanning a junction, which would misdirect
 digestion. We also confirm every oligo fits the budget, and hand the fused overhangs to
 ``checks/overhangs.py``, which scores how much homology every pair of them shares (so the

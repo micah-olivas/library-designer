@@ -43,7 +43,7 @@ from library_designer.uniprot import UniProtEntry  # noqa: E402
 # types that are not exported but are what you actually inspect in a notebook.
 # --------------------------------------------------------------------------- #
 REFERENCE = [
-    ("design", "The design", [
+    ("design", "The spec", [
         ld.LibrarySpec, ld.CodonOptimizationParams,
         ld.StartingVectorParams, ld.TiledAssemblyParams,
     ]),
@@ -74,9 +74,9 @@ uv run pytest -q          # the test suite, a few seconds""",
         [],
     ),
     (
-        "spec", "The design, as data",
+        "spec", "Write a spec",
         "A <code>LibrarySpec</code> plus a generator fully determines a library, so the "
-        "spec doubles as the design record. Write it in Python or load it from TOML. "
+        "spec doubles as the run's record. Write it in Python or load it from TOML. "
         "Give it a UniProt accession instead of pasting residues and the lookup runs "
         "once, at construction.",
         """from library_designer import LibrarySpec, CodonOptimizationParams
@@ -115,7 +115,7 @@ lib.failed        # members whose codon hit a restricted motif""",
     ),
     (
         "qc", "QC",
-        "<code>check()</code> runs the checks the design supports and returns a "
+        "<code>check()</code> runs the checks that apply to this library and returns a "
         "<code>CheckReport</code>. <code>summary()</code> wraps that in the structural "
         "metadata you need to review an order. Name a starting vector and this same "
         "report grows the assembly lines in <span class='io-ref'>Out 7a</span>.",
@@ -143,7 +143,7 @@ cmp = lib.compare_reference(idt_cds)   # agreement, GC, new sites""",
     ),
     (
         "vector", "Starting vector",
-        "Point <code>starting_vector</code> at the plasmid you clone into and the design "
+        "Point <code>starting_vector</code> at the plasmid you clone into and the library "
         "is checked and exported against the real backbone. The insert site is found by "
         "a supplied <code>cds=</code>, an annotated feature, the plasmid's sole CDS "
         "feature, or two bracketing anchors.",
@@ -180,8 +180,9 @@ lib.to_assembled_vectors("out/clones")  # a GenBank per clone, plus a manifest""
           "The assembly lines of the QC report. The alignment is the end-to-end claim a "
           "single-mutant library rests on."),
          ("html", "clone-diff",
-          "One clone against the parent plasmid. A synonymous change anywhere else in "
-          "the coding sequence would pass every other check and fail this one.")],
+          "One clone against the parent plasmid, ruled in the parent's own coordinates. "
+          "A synonymous change anywhere else in the coding sequence would pass every "
+          "other check and fail this one.")],
     ),
     (
         "tiled", "Tiled assembly",
@@ -245,12 +246,12 @@ lib.destination_vector(strict=False)    # build it anyway and look""",
         "leaves spare codons, and every one of them is a boundary that could move. "
         "<code>optimize_overhangs</code> searches those positions and keeps the layout whose "
         "overhangs share the least sequence. The balanced split is scored against every "
-        "candidate and wins ties, so the search can only hold a design steady or improve it. "
+        "candidate and wins ties, so the search can only hold a layout steady or improve it. "
         "Boundaries that move make the tiles uneven and the oligos with them, so "
         "<code>pad_oligos</code> evens the pool back out to one length. The filler goes "
         "between each primer and the recognition site beside it, outside what the enzyme "
         "releases, so it is amplified with the oligo and cut away before anything ligates. "
-        "Both default to off, so an existing design keeps the boundaries and oligos it had.",
+        "Both default to off, so an existing library keeps the boundaries and oligos it had.",
         """spec.tiled = TiledAssemblyParams(
     oligo_budget=300,
     optimize_overhangs=True,   # move the boundaries to the least similar overhangs

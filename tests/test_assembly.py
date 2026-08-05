@@ -1,6 +1,6 @@
 """Tests for the assembly simulation (checks/assembly.py).
 
-Every other check reads the sequences the design wrote down. These exercise the one that
+Every other check reads the sequences we wrote down. These exercise the one that
 puts them together: cut the oligo, cut the vector, ligate, and align the product against the
 parent plasmid. The tampering tests are the point of it, they introduce errors that no
 design-level check can see and confirm the simulation still catches them.
@@ -97,7 +97,7 @@ def test_a_mutation_inside_a_fused_overhang_cannot_ligate(tmp_path):
     lib = _standard_lib(_plasmid(tmp_path, CLEAN_CDS), A5_CDS, A3_CDS)
     rep = lib.check()
 
-    assert not rep.adaptor_issues and not rep.translation_fail   # the design itself is fine
+    assert not rep.adaptor_issues and not rep.translation_fail   # the construct itself is fine
     assert not rep.passed
     blocked = [m for m in rep.assembly_issues if "fused overhang" in m]
     assert len(blocked) == 2                                    # one finding per end
@@ -407,7 +407,9 @@ def test_each_tile_is_simulated_against_its_own_destination_vector(tiled_lib):
     plan = _plan(lib)
     assert len(plan.reactions) == len(lib.tiles)
 
-    for (label, vector, _topo, start, end, members, _wt), tile in zip(plan.reactions, lib.tiles):
+    for (label, vector, _topo, start, end, members, _wt, _p5, _p3), tile in zip(
+        plan.reactions, lib.tiles
+    ):
         assert label == f"tile{tile.index}"
         assert vector is tile.vector                      # the tile's own drop-out vector
         assert (start, end) == (tile.start, tile.end)     # judged against its own window

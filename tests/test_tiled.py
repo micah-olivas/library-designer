@@ -220,7 +220,7 @@ def test_qc_judges_the_params_used_not_the_spec_block():
 
 def test_one_wt_control_oligo_per_tile(gck):
     """Each tile is amplified out of the pool and assembled on its own, so each one needs
-    its own unmutated member. The global ``WT`` row stays as the design record and rides on
+    its own unmutated member. The global ``WT`` row stays in the table for the record and rides on
     no oligo."""
     controls = [f"WT_Tile_{t.index}" for t in gck.tiles]
     assert [n for n in gck.df["name"] if str(n).startswith("WT_Tile_")] == controls
@@ -387,3 +387,25 @@ def test_extra_sites_handles_a_palindromic_recognition_site():
         assert layout.extra_sites(dirty, len(fwd), len(rev), "PalI")
     finally:
         del motifs.ENZYME_SITES["PalI"]
+
+
+def test_a_tiled_library_writes_one_fasta_per_oligo(gck, tmp_path):
+    """The per-oligo FASTAs carry what the pool carries: the assembled oligo with its
+    primers and sites, not the bare variable region. The global WT rides on no oligo."""
+    from library_designer.io import _file_stem
+
+    # Straight to the exporter, not export_all: this fixture keeps its one unmakeable
+    # variant, and an order refuses to go out incomplete.
+    d = tmp_path / "oligos"
+    gck.to_oligo_files(d, fmt="fasta")
+
+    placed = {str(n): o for n, o in zip(gck.df["name"], gck.df["oligo"])
+              if isinstance(o, str)}
+    assert {p.name for p in d.iterdir()} == {f"{_file_stem(n)}.fasta" for n in placed}
+    assert not (d / "WT.fasta").exists()
+    assert any(n.startswith("WT_Tile_") for n in placed)   # per-tile controls do ship
+
+    for name, oligo in placed.items():
+        head, seq, _ = (d / f"{_file_stem(name)}.fasta").read_text().split("\n")
+        assert head == f">{name}"
+        assert seq == oligo.upper()

@@ -32,8 +32,8 @@ def run_directory(base: str | Path = "out", name: str | None = None,
                   when: datetime | None = None, create: bool = True) -> Path:
     """``base/<name>_<stamp>``, the directory one run's files go in.
 
-    A run writes to its own dated directory so a second run cannot quietly overwrite the
-    first and every file on disk says which run produced it. ``when`` pins the stamp, so a
+    A run writes to its own dated directory so a second run cannot overwrite the first,
+    and every file on disk names the run that produced it. ``when`` pins the stamp, so a
     library can name the directory after the moment its sequences were built rather than
     the moment they were written. The directory is created unless ``create=False``. With
     no ``name`` the directory is the bare stamp."""
@@ -139,7 +139,7 @@ def to_usortm(library, path: str | Path) -> None:
             "to_usortm() does not support tiled libraries. A tiled pool is many "
             "sublibraries, each with its own per-tile reference and length, so it "
             "cannot be written as one uniform name,sequence variable-region block "
-            "(emitting the whole CDS per variant would silently corrupt the handoff). "
+            "(emitting the whole CDS per variant would produce a wrong handoff). "
             "The per-tile uSort-M convention (grouping on Tile_N) is still being "
             "settled on the uSort-M side; use to_oligo_pool() for the physical pooled "
             "order in the meantime."
@@ -157,7 +157,7 @@ def to_usortm(library, path: str | Path) -> None:
     out.to_csv(path, index=False)
 
     # Record what was handed off, next to the run identity, so the downstream tool can tie
-    # the CSV it is reading to the design run that produced it. The CSV itself stays exactly
+    # the CSV it is reading to the run that produced it. The CSV itself stays exactly
     # `name,sequence`: uSort-M parses it strictly, so the provenance goes in the record
     # beside it rather than as extra columns or a comment line it would have to tolerate.
     library.design_specs["handoff"] = {
@@ -255,6 +255,146 @@ def to_oligo_pool(library, path: str | Path) -> None:
     out = pd.DataFrame({"name": names, "sequence": df["oligo"][mask]})
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(path, index=False)
+
+
+def _coding_slice(library) -> dict[str, tuple[str, int | None]]:
+    """Per member, the coding stretch its oligo carries and the residue index it mutates.
+
+    A standard library's oligo holds the whole CDS. A tiled library's holds only its tile
+    window, and the mutated codon is counted from the start of that window, so a tiled
+    member's index is rebased. ``None`` means nothing is mutated (a wild-type control).
+    """
+    df = library.df
+    tiles = getattr(library, "tiles", None)
+    idx = df["mut_index"] if "mut_index" in df.columns else [pd.NA] * len(df)
+    out: dict[str, tuple[str, int | None]] = {}
+    if tiles is None:
+        for name, dna, i in zip(df["name"], df["variable_dna"], idx):
+            if isinstance(dna, str):
+                out[str(name)] = (dna, None if pd.isna(i) else int(i))
+        return out
+    spans = {t.index: (t.start, t.end) for t in tiles}
+    for name, dna, i, ti in zip(df["name"], df["variable_dna"], idx, df["tile"]):
+        if not isinstance(dna, str) or pd.isna(ti) or int(ti) not in spans:
+            continue
+        s, e = spans[int(ti)]
+        rebased = None if pd.isna(i) else int(i) - s // 3
+        out[str(name)] = (dna[s:e], rebased)
+    return out
+
+
+def _oligo_record(name: str, seq: str, coding: str, mut_index: int | None,
+                  enzyme: str | None, label: str):
+    """One oligo as an annotated SeqRecord: its coding stretch, the mutated codon, and any
+    Type IIS recognition sites, on either strand.
+
+    The sites are annotated where they are found rather than where they were meant to be, so
+    a stray site inside the coding region shows up in the map as readily as the intended ones
+    in the adaptors."""
+    from Bio.Seq import Seq
+    from Bio.SeqFeature import SeqFeature, SimpleLocation
+    from Bio.SeqRecord import SeqRecord
+
+    from .checks.motifs import recognition_site
+    from .regions import reverse_complement
+
+    feats = []
+    at = seq.find(coding) if coding else -1
+    if at >= 0:
+        feats.append(SeqFeature(SimpleLocation(at, at + len(coding), strand=1), type="CDS",
+                                qualifiers={"label": [label], "codon_start": ["1"]}))
+        if mut_index is not None and 0 <= mut_index * 3 < len(coding):
+            lo = at + mut_index * 3
+            feats.append(SeqFeature(
+                SimpleLocation(lo, lo + 3, strand=1), type="variation",
+                qualifiers={"label": [f"{name} ({seq[lo:lo + 3]})"]},
+            ))
+    if enzyme:
+        site = recognition_site(enzyme)
+        for pattern, strand in ((site, 1), (reverse_complement(site), -1)):
+            if strand == -1 and pattern == site:
+                continue                      # a palindromic site is not two features
+            for i in _find_all(seq, pattern):
+                feats.append(SeqFeature(SimpleLocation(i, i + len(pattern), strand=strand),
+                                        type="protein_bind",
+                                        qualifiers={"label": [enzyme]}))
+    feats.sort(key=lambda f: int(f.location.start))
+    rec = SeqRecord(Seq(seq), id=_file_stem(name)[:16], name=_file_stem(name)[:16],
+                    description=f"{label} {name} synthesis oligo",
+                    annotations={"molecule_type": "DNA", "topology": "linear"})
+    rec.features = feats
+    return rec
+
+
+def to_oligo_files(library, directory: str | Path, fmt: str = "genbank") -> int:
+    """Write one file per ordered oligo into ``directory``, and return how many were written.
+
+    One file per library member, named for the variant (``K7stop.gb`` for an amber ``K7*``,
+    since ``*`` globs in a shell). The sequence is the one the order carries, so a tiled
+    library writes its assembled ``oligo`` (primers, enzyme sites, tile window, and the
+    per-tile ``WT_Tile_<i>`` controls) and any other library writes the whole construct with
+    its adaptors. Uppercase throughout, unlike uSort-M's ``variants.csv``, which lowercases
+    the flanks to mark them.
+
+    ``fmt`` is ``"genbank"`` (the default), ``"fasta"``, or ``"both"``. A GenBank file is
+    annotated with the coding stretch the oligo carries, the mutated codon, and every Type
+    IIS recognition site on either strand, so the oligo can be read in a plasmid editor
+    without working out the parts by eye. FASTA is sequence only, for aligners and anything
+    that wants one accession per file.
+
+    A tiled library's global ``WT`` row rides on no oligo, so it gets no file, as in
+    ``to_oligo_pool``. Two variant names that would land on the same filename are refused
+    rather than silently overwriting each other."""
+    if fmt not in ("genbank", "fasta", "both"):
+        raise ValueError(f"Unknown fmt {fmt!r} (use 'genbank', 'fasta', or 'both').")
+    _require_optimized(library)
+    df = library.df
+    tiled = getattr(library, "tiles", None) is not None
+    seqs = df["oligo"] if tiled else _assembled(library)
+
+    pairs = [(str(n), s.upper()) for n, s in zip(df["name"], seqs) if isinstance(s, str)]
+    if not pairs:
+        raise ValueError(
+            "No sequences to write. Optimize the library first, and for a tiled library "
+            "call tile() so each member has an oligo."
+        )
+    # _file_stem rewrites '*' and anything the filesystem dislikes, so two names can arrive
+    # at one filename. Overwriting would drop a variant from an order.
+    claimed: dict[str, str] = {}
+    for name, _ in pairs:
+        stem = _file_stem(name)
+        if stem in claimed:
+            raise ValueError(
+                f"Variants {claimed[stem]!r} and {name!r} both map to the same filename "
+                f"({stem}). Rename one of them."
+            )
+        claimed[stem] = name
+
+    d = Path(directory)
+    d.mkdir(parents=True, exist_ok=True)
+    if fmt in ("fasta", "both"):
+        for name, seq in pairs:
+            (d / f"{_file_stem(name)}.fasta").write_text(f">{name}\n{seq}\n")
+    if fmt in ("genbank", "both"):
+        try:
+            from Bio import SeqIO
+        except ImportError as exc:
+            raise ImportError(
+                "Writing GenBank oligos needs BioPython, a base dependency. "
+                "Reinstall library-designer if it is missing."
+            ) from exc
+
+        spec = library.spec
+        vec = spec.resolve_vector(library.tiled_params)
+        enzyme = (library.tiled_params.enzyme if tiled
+                  else vec.enzyme if vec is not None
+                  else next(iter(spec.avoid_enzymes), None))
+        coding = _coding_slice(library)
+        for name, seq in pairs:
+            cds, mut = coding.get(name, ("", None))
+            SeqIO.write(_oligo_record(name, seq, cds, mut, enzyme, spec.name),
+                        str(d / f"{_file_stem(name)}.gb"), "genbank")
+    return len(pairs)
 
 
 def to_primer_order(library, path: str | Path,
@@ -378,12 +518,11 @@ def to_vector_maps(library, directory: str | Path) -> None:
         ) from exc
 
     from .checks.motifs import ENZYME_SITES, cut_geometry
-    from .layout.vector_io import (
-        insert_offset, locating_kwargs, origin_in_source, resolve_destination,
-    )
+    from .layout.destination import resolve_insert_locus
+    from .layout.vector_io import insert_offset, origin_in_source
     from .regions import reverse_complement
 
-    dest = resolve_destination(vec.path, **locating_kwargs(library.spec, params))
+    dest = resolve_insert_locus(library.spec, params)
     reference = library.reference
     enzyme = vec.enzyme
     stuffer = vec.vector_insert.upper()
@@ -516,16 +655,20 @@ def to_assembled_vectors(library, directory: str | Path, fmt: str = "both") -> N
         ) from exc
 
     from .checks.assembly import assembled_products, parent_vector
-    from .layout.vector_io import (
-        insert_offset, locating_kwargs, origin_in_source, resolve_destination,
-    )
+    from .layout.destination import resolve_insert_locus
+    from .layout.vector_io import insert_offset, origin_in_source
 
     spec = library.spec
     vec = spec.resolve_vector(library.tiled_params)
     parent = parent_vector(library)
-    dest = resolve_destination(vec.path, **locating_kwargs(spec, library.tiled_params))
+    dest = resolve_insert_locus(spec, library.tiled_params)
     reference = library.reference
-    cds_at, n = insert_offset(dest), len(parent)
+    locus_at, n = insert_offset(dest), len(parent)
+    # The locus holds the reference plus whatever bases the adaptors re-supply, and the coding
+    # region starts past the 5' padding. Both numbers are needed: features are remapped around
+    # the whole locus, while the CDS and the mutated codon are placed from the coding start.
+    locus_len = dest.pad_5 + len(reference) + dest.pad_3
+    cds_at = locus_at + dest.pad_5
     source = Path(vec.path).name
 
     # Every clone is the same molecule apart from one codon, so the backbone annotation is
@@ -536,9 +679,9 @@ def to_assembled_vectors(library, directory: str | Path, fmt: str = "both") -> N
     # region instead would misplace every downstream annotation whenever the two differ.
     def _remap(p: int) -> int:
         if p < dest.start:
-            return p if dest.topology != "circular" else (cds_at - (dest.start - p)) % n
-        downstream = len(reference) + (p - dest.end)
-        return (cds_at + downstream) % n if dest.topology == "circular" else dest.start + downstream
+            return p if dest.topology != "circular" else (locus_at - (dest.start - p)) % n
+        downstream = locus_len + (p - dest.end)
+        return (locus_at + downstream) % n if dest.topology == "circular" else dest.start + downstream
 
     shared: list = [SeqFeature(SimpleLocation(cds_at, cds_at + len(reference), strand=1),
                                type="CDS", qualifiers={"label": [spec.name], "codon_start": ["1"]})]

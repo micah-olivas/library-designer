@@ -1,30 +1,28 @@
-"""Choosing where the tile boundaries fall, so the fused overhangs tell each other apart.
+"""Choosing where the tile boundaries fall, so the fused overhangs are distinct.
 
 ``compute_tiles`` splits a CDS into the fewest codon-aligned windows that fit the oligo
-budget and balances them. Nothing in that picks the overhangs. They are whatever bases
-happen to sit at the boundaries, so a tile can end up with two ends that cannot tell each
-other apart and no way to see it coming.
+budget and balances them. Nothing in that picks the overhangs. They are whatever bases sit at
+the boundaries, so a tile can end up with two indistinguishable ends and nothing to warn you.
 
-What counts is a tile against itself. Each tile is amplified out of the pool with its own
-primer pair and assembled into the vector built around its own window, so its reaction holds
-its own fragments and nothing else. Homology between two different tiles' overhangs is free,
-and the search spends the layout's slack only on the comparisons that can actually misfire:
-a tile's two ends against each other, and each end against its own reverse complement.
+Only a tile against itself matters. Each tile is amplified out of the pool with its own primer
+pair and assembled into the vector built around its own window, so its reaction holds its own
+fragments and nothing else. Homology between two different tiles' overhangs is harmless, so
+the search only scores the comparisons that can misfire: a tile's two ends against each other,
+and each end against its own reverse complement.
 
 There is usually slack. The budget sets a *maximum* tile, the balanced split sits under it,
-and every spare codon is a boundary that could move. Shifting one boundary by a codon
-changes both overhangs it creates, so a search over the boundary positions is a search over
-the overhang set. This module runs that search, scoring a layout with the same functions QC
-grades it with (``checks/overhangs.py``), so the two cannot disagree.
+and every spare codon is a boundary that could move. Shifting one boundary by a codon changes
+both overhangs it creates, so a search over the boundary positions is a search over the
+overhang set. This module runs that search, scoring a layout with the same functions QC grades
+it with (``checks/overhangs.py``), so the two cannot disagree.
 
-The search is a beam over the boundaries left to right. It is a candidate generator, not the
-judge: every layout it surfaces is rescored whole by ``windows_cost``, and the balanced split
-is scored alongside them, so the result is never worse than what the design would have had
-without the search.
+The search is a beam over the boundaries left to right. It proposes candidates; every layout
+it surfaces is rescored whole by ``windows_cost``, and the balanced split is scored alongside
+them, so the search never returns a worse layout than the one it started from.
 
 A boundary can also spoil an oligo. The overhang sits between the spacer and the tile, so a
-boundary whose bases spell part of a recognition site next to the spacer makes an oligo no
-primer can rescue. That is priced in at the same weight as a collision.
+boundary whose bases spell part of a recognition site next to the spacer makes an oligo that no
+primer choice fixes. That is weighted like a collision.
 """
 from __future__ import annotations
 
@@ -36,10 +34,9 @@ from ..regions import reverse_complement
 BEAM = 200              # partial layouts carried forward past each boundary
 MAX_CANDIDATES = 96     # boundary positions tried per step, spread over the feasible range
 
-# What one comparison costs. A collision between the two ends of a single tile, a palindrome,
-# and a boundary that spoils the oligo all make the wrong product the expected one, so they
-# dominate. Below them sits a single mismatch, which T4 ligase joins at a rate you will see on
-# a plate, and below that anything merely above target.
+# What one comparison costs. Highest: a collision between a tile's two ends, a palindrome, or
+# a boundary that spoils the oligo. Next: a single mismatch, which T4 ligase joins at a rate
+# you will see on a plate. Lowest: anything above target.
 _FATAL = 1_000_000
 _HIGH = 10_000
 _WATCH = 1
@@ -118,7 +115,7 @@ def windows_cost(reference: str, params, windows: list[tuple[int, int]]) -> int:
     """What a whole layout costs: every pair of its overhangs, every palindrome among them,
     and every boundary that spoils an oligo.
 
-    This is the judge. The beam only proposes."""
+    Scores a whole layout, unlike the beam, which scores partial ones as it builds them."""
     ends = layout_ends(reference, params, windows)
     total = sum(_FATAL for _, seq in ends if _palindrome(seq))
     for i, a in enumerate(ends):
@@ -158,11 +155,11 @@ def _candidates(lo: int, hi: int) -> list[int]:
 
 def search_windows(reference: str, params, baseline: list[tuple[int, int]],
                    max_codons: int) -> list[tuple[int, int]]:
-    """Tile windows whose overhangs tell each other apart as well as this CDS allows.
+    """Tile windows whose overhangs are as distinct as this CDS allows.
 
     Same tile count and same constraints as ``baseline``, which is the balanced split. The
     boundaries move, nothing else. ``baseline`` is scored against every candidate and wins
-    ties, so turning the search on can only hold a layout steady or improve it.
+    ties, so the search never returns a worse layout.
     """
     n = len(baseline)
     o = params.overhang_len
@@ -202,8 +199,8 @@ def search_windows(reference: str, params, baseline: list[tuple[int, int]],
         nxt.sort(key=lambda row: (row[0], row[1]))
         beam = nxt[:BEAM]
 
-    # The beam proposes; windows_cost judges. Scoring the baseline the same way is what makes
-    # the search safe to turn on.
+    # The baseline is scored the same way as every candidate, so the search cannot return a
+    # worse layout than the balanced split.
     best, best_cost = baseline, windows_cost(reference, params, baseline)
     for _cost, chosen, _ends in beam:
         cuts = [0] + [3 * p for p in chosen] + [len(reference)]

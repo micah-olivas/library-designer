@@ -6,7 +6,8 @@ Reverse-translate a protein and codon-optimize it under the spec's sequence rule
 set here. Mutations, including pinned literal codons such as an amber ``TAG`` or any
 forced codon, are stamped onto that reference by ``backbone._stamp``: it places a
 pinned codon verbatim and steps a sense residue down its usage ranking only to avoid
-a restricted motif. So this module never pins a codon itself.
+a restricted motif (unless ``optimization.synonymous_fallback`` is off, which turns that
+position into a reported failure instead). So this module never pins a codon itself.
 
 All tunable settings live on ``spec.optimization`` (species, method, GC window,
 iterations) so they are configurable and recorded in the design specs.

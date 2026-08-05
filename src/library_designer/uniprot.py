@@ -5,9 +5,9 @@ records which entry it was, so the design specs say where the sequence came from
 than leaving a bare string of residues in the file.
 
 The download is cached on disk, so a spec resolves once and every later run reads the
-cached FASTA. That keeps re-running a design offline and repeatable, which matters because
+cached FASTA. That keeps re-running a spec offline and repeatable, which matters because
 UniProt entries do change: the fetched sequence is stored on the spec and in the design
-record, so a design stays reproducible even after the entry is revised. Pass
+specs, so the library stays reproducible even after the entry is revised. Pass
 ``refresh=True`` to fetch again.
 
 Only the stdlib is used for the request, so nothing new is installed to make this work.

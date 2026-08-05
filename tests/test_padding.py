@@ -2,9 +2,9 @@
 
 Tiles differ in size, so the oligos do too, and moving the boundaries for better overhangs
 widens the spread. Padding closes it by adding filler between each primer and the recognition
-site beside it. That position is the whole point: it is outside what the enzyme releases, so
-the pad rides through the PCR and is cut away before anything is ligated. The load-bearing
-test here is that the assembled fragment comes out byte-identical with the padding on.
+site beside it. The pad sits outside what the enzyme releases: it is outside what the enzyme releases, so
+the pad is amplified with the oligo and cut away before ligation. The test here is that
+the assembled fragment is unchanged with the padding on.
 """
 from __future__ import annotations
 
@@ -40,8 +40,8 @@ def _lengths(lib) -> set[int]:
 # --- the filler itself --------------------------------------------------------
 
 def test_filler_carries_no_recognition_site():
-    """A pad next to a recognition site must not extend it, so the filler cannot contain one
-    to begin with. Doubled, since pads longer than the filler wrap around it."""
+    """A pad next to a recognition site must not extend it, so the filler cannot contain
+    one. Doubled, since pads longer than the filler wrap around it."""
     doubled = _FILLER * 2
     for enzyme in ENZYME_SITES:
         assert count_enzyme_sites(doubled, enzyme) == 0
@@ -81,7 +81,7 @@ def test_padding_stays_within_the_budget():
 
 def test_padded_length_is_the_longest_oligo_the_layout_needed():
     """Padding evens the pool up to the tile that was already longest, so no oligo grows
-    beyond what the design required anyway."""
+    beyond what the layout required."""
     params = _params(optimize_overhangs=True, pad_oligos=True)
     lib = _lib(CDS, params)
     windows = [(t.start, t.end) for t in lib.tiles]
@@ -122,7 +122,7 @@ def test_no_target_when_padding_is_off():
 # --- the pad does not reach the product ---------------------------------------
 
 def test_the_pad_is_cut_away_and_the_fragment_is_unchanged():
-    """The whole justification for padding between the primer and the site. Same windows
+    """Why the pad goes between the primer and the site. Same windows
     either way, so any difference in the released fragment would be the pad leaking through.
     """
     plain = _lib(CDS, _params(optimize_overhangs=True))

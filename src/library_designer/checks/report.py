@@ -12,7 +12,7 @@ adjacent adaptor bases across the junction, which the old variable-only check
 missed. Translation round-trip is still checked on the variable region alone
 (adaptors are not coding).
 
-Two extra sets of checks switch on when the design says more about how it is built. A tiled
+Two extra sets of checks switch on when the spec says more about how the library is built. A tiled
 library adds the per-oligo and per-tile-vector checks in ``checks/tiled.py``. A standard
 library that names a starting vector adds the adaptor-against-the-plasmid checks in
 ``checks/vector.py``, which is the only place a construct that looks clean on its own can
@@ -21,13 +21,30 @@ be caught not fitting the backbone it is meant to clone into.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from html import escape as _esc
 
 import pandas as pd
 
 from ..regions import assemble
 from .motifs import count_enzyme_sites
 from .translation import translates_to
+
+
+def label_width(labels, cap: int = 20) -> int:
+    """How far to pad ``label:`` so a block of values lines up.
+
+    Measured over the labels actually present, so a short report stays tight instead of being
+    spaced out by a label it never printed. A label past ``cap`` (a motif pattern, say) is left
+    long rather than pushing every other value across the screen.
+    """
+    return max((len(label) for label in labels if len(label) <= cap), default=0) + 2
+
+
+def rows_to_lines(rows: list[tuple[str, str]], indent: str = "  ", cap: int = 20) -> list[str]:
+    """``[(label, value), ...]`` as aligned ``label: value`` lines."""
+    width = label_width([label for label, _ in rows], cap)
+    return [f"{indent}{(label + ':').ljust(width)}{value}".rstrip() for label, value in rows]
 
 
 def _names(items: list[str], limit: int = 4) -> str:
@@ -48,7 +65,14 @@ class CheckReport:
     pass. ``assembly_checked``, ``assembly_correct``, and ``assembly_aligned`` are the
     exception, being counts of members put through the simulation.
 
-    Which fields can fill in depends on the design. ``oligo_extra_sites``,
+    ``off_target_edits`` is the single-WT-reference invariant, checked on the sequences rather
+    than on an assembled plasmid. Every member has to match the frozen
+    reference outside the codon(s) it is meant to mutate. It runs on any library with a shared
+    reference, with or without a destination vector, which is what makes it different from
+    ``assembly_aligned``, the same idea read off the simulated clone and only available when
+    there is a plasmid to assemble into.
+
+    Which fields can fill in depends on the library. ``oligo_extra_sites``,
     ``oligo_over_budget``, and ``unplaced`` come from a library that has been ``tile()``'d.
     ``adaptor_issues`` comes from a standard library that names a starting vector.
     ``overhang_issues`` and ``vector_extra_sites`` come from either of those two. The
@@ -63,7 +87,7 @@ class CheckReport:
     vector has no advisories to report.
 
     ``overhang_advisories`` is informational for the same reason. It names overhang pairs
-    that share more homology than the design should carry without being an outright
+    that share more homology than a library should carry without being an outright
     collision, which is a hazard worth reading and not a verdict, since the overhangs come
     off the CDS rather than from an orthogonal set. ``lib.overhang_pairs()`` is the full
     table behind it.
@@ -72,6 +96,9 @@ class CheckReport:
     n_variants: int
     optimization_failed: list[str] = field(default_factory=list)
     translation_fail: list[str] = field(default_factory=list)
+    # Members whose DNA differs from the frozen reference somewhere other than the codon(s)
+    # they are supposed to mutate. See off_target_edits in check_library.
+    off_target_edits: list[str] = field(default_factory=list)
     enzyme_hits: dict[str, list[str]] = field(default_factory=dict)
     motif_hits: dict[str, list[str]] = field(default_factory=dict)
     length_exceeded: list[str] = field(default_factory=list)
@@ -111,6 +138,7 @@ class CheckReport:
         return (
             not self.optimization_failed
             and not self.translation_fail
+            and not self.off_target_edits
             and not any(self.enzyme_hits.values())
             and not any(self.motif_hits.values())
             and not self.length_exceeded
@@ -125,70 +153,161 @@ class CheckReport:
         )
 
     def text(self, count: bool = True) -> str:
-        """The readable report. ``count`` prints the variant count in the header, which
-        ``LibrarySummary`` turns off because its own first line already gives it."""
+        """The readable report, one check per line with the values in a column.
+
+        ``count`` prints the variant count in the header, which ``LibrarySummary`` turns off
+        because its own first line already gives it. Checks that found nothing are left out,
+        apart from the two that are worth seeing pass (translation and forbidden sequences),
+        so a clean report stays short enough to read at a glance.
+        """
         head = "QC report: " + (f"{self.n_variants} variants, " if count else "")
-        lines = [head + ("PASS" if self.passed else "FAIL")]
         checked = self.n_variants - len(self.optimization_failed)
+        rows: list[tuple[str, str]] = []
+
         if self.optimization_failed:
-            lines.append(f"  optimization: {len(self.optimization_failed)} failed{_names(self.optimization_failed)}")
+            rows.append(("optimization",
+                         f"{len(self.optimization_failed)} failed{_names(self.optimization_failed)}"))
         ok = checked - len(self.translation_fail)
-        lines.append(f"  translation round-trip: {ok}/{checked} ok{_names(self.translation_fail)}")
-        # Name the sites that were hit, and collapse the clean ones into one line rather
-        # than a "no hit(s)" line each, which on a passing library is most of the report.
+        rows.append(("translation", f"{ok}/{checked}{_names(self.translation_fail)}"))
+        if self.off_target_edits:
+            rows.append(("unintended edits",
+                         f"{len(self.off_target_edits)} outside their own codon"
+                         f"{_names(self.off_target_edits)}"))
+
+        # Name the sites that were hit, and collapse the clean ones into one row rather than a
+        # "none" row each, which on a passing library is most of the report.
         clean: list[str] = []
         for enz, hits in self.enzyme_hits.items():
             if hits:
-                lines.append(f"  {enz} site: {len(hits)} hit(s){_names(hits)}")
+                rows.append((f"{enz} sites", f"{len(hits)} hit{'' if len(hits) == 1 else 's'}{_names(hits)}"))
             else:
                 clean.append(enz)
         clean_motifs = 0
         for pat, hits in self.motif_hits.items():
             if hits:
-                lines.append(f"  motif /{pat}/: {len(hits)} hit(s){_names(hits)}")
+                rows.append((f"motif /{pat}/", f"{len(hits)} hit{'' if len(hits) == 1 else 's'}{_names(hits)}"))
             else:
                 clean_motifs += 1
         if clean or clean_motifs:
             motifs = f"{clean_motifs} motif" + ("s" if clean_motifs > 1 else "")
-            what = clean + ([motifs] if clean_motifs else [])
-            lines.append("  no forbidden sequences (checked " + ", ".join(what) + ")")
+            rows.append(("forbidden sequences",
+                         "none (checked " + ", ".join(clean + ([motifs] if clean_motifs else [])) + ")"))
+
         if self.length_exceeded:
-            lines.append(
-                f"  length: {len(self.length_exceeded)} over max_oligo_length"
-                f"{_names(self.length_exceeded)}"
-            )
-        for label, hits in (
-            ("oligo extra enzyme site(s)", self.oligo_extra_sites),
-            ("oligo over budget", self.oligo_over_budget),
-            ("tile overhang issue(s)", self.overhang_issues),
-            ("unplaced variant(s)", self.unplaced),
-            ("destination vector extra enzyme site(s)", self.vector_extra_sites),
-            ("adaptor/destination-vector issue(s)", self.adaptor_issues),
-            ("assembly issue(s)", self.assembly_issues),
-        ):
+            rows.append(("length",
+                         f"{len(self.length_exceeded)} over max_oligo_length{_names(self.length_exceeded)}"))
+        # Checks that report member names keep them on the row. Checks that report whole
+        # sentences get the count on the row and the sentences underneath, since a paragraph
+        # wedged into parentheses runs off the screen and hides the column.
+        for label, hits in (("oligo enzyme sites", self.oligo_extra_sites),
+                            ("oligo length", self.oligo_over_budget),
+                            ("unplaced", self.unplaced)):
             if hits:
-                lines.append(f"  {label}: {len(hits)}{_names(hits)}")
+                rows.append((label, f"{len(hits)}{_names(hits)}"))
+        spelled_out: list[tuple[str, list[str]]] = [
+            (label, hits) for label, hits in (("tile overhangs", self.overhang_issues),
+                                              ("vector enzyme sites", self.vector_extra_sites),
+                                              ("adaptors vs vector", self.adaptor_issues),
+                                              ("assembly issues", self.assembly_issues))
+            if hits
+        ]
+        rows += [(label, str(len(hits))) for label, hits in spelled_out]
+
         if self.assembly_checked:
-            lines.append(
-                f"  assembly simulation: {self.assembly_correct}/{self.assembly_checked} "
-                "members rebuild their intended variant"
-            )
+            rows.append(("assembly",
+                         f"{self.assembly_correct}/{self.assembly_checked} rebuild their variant"))
             if self.assembly_aligned:
-                lines.append(
-                    f"  aligned to the parent vector: {self.assembly_aligned}/{self.assembly_checked} "
-                    "differ only at the intended codon"
-                )
-        advisories = self.reference_advisories + self.overhang_advisories
+                rows.append(("parent alignment",
+                             f"{self.assembly_aligned}/{self.assembly_checked} differ only at "
+                             "the intended codon"))
+
+        advisories = self.advisories
         if advisories:
-            lines.append(f"  advisories (not failures): {len(advisories)}")
-            for msg in advisories[:5]:
+            rows.append(("advisories", f"{len(advisories)}, not failures"))
+
+        detail = {label: hits for label, hits in spelled_out}
+        detail["advisories"] = advisories
+        width = label_width([label for label, _ in rows])
+        lines = [head + ("PASS" if self.passed else "FAIL")]
+        for label, value in rows:
+            lines.append(f"  {(label + ':').ljust(width)}{value}".rstrip())
+            for msg in detail.get(label, [])[:5]:
                 lines.append("    - " + msg)
-            if len(advisories) > 5:
-                lines.append(f"    ... and {len(advisories) - 5} more")
+            if len(detail.get(label, [])) > 5:
+                lines.append(f"    ... and {len(detail[label]) - 5} more")
         return "\n".join(lines)
 
     def __str__(self) -> str:
         return self.text()
+
+    def __repr__(self) -> str:   # the readable report, not a dump of every empty field
+        return self.text()
+
+    def _repr_html_(self) -> str:
+        return f"<pre style='margin:0;line-height:1.4'>{_esc(str(self))}</pre>"
+
+    # --- structured views, for reading the result in code ------------------
+    #
+    # Split around the two per-pattern checks, which need a key each, so ``issues`` comes
+    # out in the order ``text()`` prints and ``passed`` tests.
+    _CHECKS_BEFORE_PATTERNS = ("optimization_failed", "translation_fail",
+                               "off_target_edits")
+    _CHECKS_AFTER_PATTERNS = (
+        "length_exceeded", "oligo_extra_sites", "oligo_over_budget", "overhang_issues",
+        "unplaced", "vector_extra_sites", "adaptor_issues", "assembly_issues",
+    )
+
+    @property
+    def issues(self) -> dict[str, list[str]]:
+        """Only the checks that found something, as ``{check: entries}``. Empty exactly
+        when ``passed`` is True, so ``if rep.issues:`` is the branch to write in a script.
+
+        Keys are field names, except the two per-pattern checks, which are split out one
+        key per enzyme or motif (``"enzyme_hits:BsaI"``,
+        ``"motif_hits:GGAGG.{8,12}[AG]TG"``), and ``"assembly_incorrect"``, which reports
+        the count mismatch that has no list of its own.
+
+        Entries are variant names for the checks that judge members one at a time
+        (optimization, translation, enzyme and motif hits, length, the oligo checks,
+        ``unplaced``) and sentences for the ones that judge the design as a whole
+        (``overhang_issues``, ``vector_extra_sites``, ``adaptor_issues``,
+        ``assembly_issues``). Advisories are not here, they are not failures; see
+        ``advisories``.
+        """
+        out: dict[str, list[str]] = {}
+        for name in self._CHECKS_BEFORE_PATTERNS:
+            if hits := getattr(self, name):
+                out[name] = list(hits)
+        for field_name, per_pattern in (("enzyme_hits", self.enzyme_hits),
+                                       ("motif_hits", self.motif_hits)):
+            for pattern, hits in per_pattern.items():
+                if hits:
+                    out[f"{field_name}:{pattern}"] = list(hits)
+        for name in self._CHECKS_AFTER_PATTERNS:
+            if hits := getattr(self, name):
+                out[name] = list(hits)
+        if self.assembly_correct != self.assembly_checked:
+            missing = self.assembly_checked - self.assembly_correct
+            out["assembly_incorrect"] = [
+                f"{missing} of {self.assembly_checked} members do not rebuild their "
+                "intended variant"
+            ]
+        return out
+
+    @property
+    def advisories(self) -> list[str]:
+        """Both informational lists in one, the reference ones then the overhang ones.
+        Worth reading, but they never affect ``passed`` or ``issues``."""
+        return list(self.reference_advisories) + list(self.overhang_advisories)
+
+    def to_dict(self) -> dict:
+        """The whole report as plain data, every field plus ``passed``, ``issues``, and
+        ``advisories``. JSON-serializable, for recording a run or diffing two of them."""
+        out = asdict(self)
+        out["passed"] = self.passed
+        out["issues"] = self.issues
+        out["advisories"] = self.advisories
+        return out
 
 
 def verbatim_advisories(spec, reference: str) -> list[str]:
@@ -208,6 +327,40 @@ def verbatim_advisories(spec, reference: str) -> list[str]:
         n = len(re.findall(p, reference))
         if n:
             out.append(f"reference carries {n} /{p}/ motif(s), kept verbatim (not recoded)")
+    return out
+
+
+def off_target_edits(library) -> list[str]:
+    """Members whose DNA strays from the frozen reference outside the codon(s) they mutate.
+
+    The single-WT-reference invariant, and the reason the backbone-and-stamp model exists: a
+    single-mutant library is only interpretable if every member matches the WT
+    everywhere except its own position, otherwise a phenotype cannot be pinned on the
+    substitution. Optimizing each variant separately breaks this quietly, since a
+    usage-matching method lets unchanged positions drift apart between members.
+
+    Judged per member against ``library.reference``, so it needs a library with one. A
+    ``SequenceSet`` has no shared WT (every member is a different gene) and gives ``[]``.
+    Intended positions come from ``mut_index``; a row with none, the wild-type control and the
+    per-tile ``WT_Tile_<i>`` controls, has to match the reference exactly. Written over a set
+    of intended indices rather than a single one, so a multi-substitution generator would be
+    covered without changing this.
+    """
+    reference = getattr(library, "reference", None)
+    if not reference or "variable_dna" not in library.df.columns:
+        return []
+    df = library.df
+    idx = df["mut_index"] if "mut_index" in df.columns else [pd.NA] * len(df)
+    out: list[str] = []
+    for name, dna, i in zip(df["name"], df["variable_dna"], idx):
+        if not isinstance(dna, str):
+            continue                       # optimization failed; reported on its own
+        if len(dna) != len(reference):
+            out.append(str(name))
+            continue
+        intended = set() if pd.isna(i) else set(range(int(i) * 3, int(i) * 3 + 3))
+        if any(a != b and k not in intended for k, (a, b) in enumerate(zip(dna, reference))):
+            out.append(str(name))
     return out
 
 
@@ -266,7 +419,8 @@ def check_library(library) -> CheckReport:
             length_exceeded.append(name)
 
     report = CheckReport(
-        len(df), opt_failed, translation_fail, enzyme_hits, motif_hits, length_exceeded
+        len(df), opt_failed, translation_fail, off_target_edits(library), enzyme_hits,
+        motif_hits, length_exceeded,
     )
     if getattr(library, "tiles", None) is not None:
         from .tiled import check_tiled
@@ -290,7 +444,7 @@ def check_library(library) -> CheckReport:
         report.reference_advisories = v["advisories"]
         report.overhang_advisories = v["overhang_advisories"]
 
-    # Then put the design together: digest, ligate, and align the product against the
+    # Then put the construct together: digest, ligate, and align the product against the
     # parent. Needs something to assemble into, so a library with no destination vector
     # (tiled or a starting vector) is skipped.
     if getattr(library, "tiles", None) is not None or spec.vector is not None:

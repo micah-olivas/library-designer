@@ -1,7 +1,7 @@
 """Tests for Golden Gate overhang specificity (checks/overhangs.py).
 
 Two overhangs that are too much alike let the cut vector re-close empty or take the
-fragment in backwards, so the design has to score every pair rather than only look for
+fragment in backwards, so the check has to score every pair rather than only look for
 exact duplicates. These cover the arithmetic, how a finding is graded, and what QC and the
 destination-vector builder do with it.
 """
@@ -312,8 +312,91 @@ def test_qc_reports_the_collision_instead_of_blowing_up(tmp_path):
 
 
 def test_pair_table_still_works_on_a_colliding_vector(tmp_path):
-    """The table is most wanted exactly when the design is broken, so it must not go empty."""
+    """The table is most wanted exactly when the layout is broken, so it must not go empty."""
     bb3 = BB5[-4:] + "CTAGGCATTACGTACGTACG"
     pairs = _colliding_lib(tmp_path, bb3).overhang_pairs()
     assert len(pairs) == 1
     assert pairs.loc[0, "risk"] == "collision"
+
+
+# --- the two events, from first principles ------------------------------------
+#
+# `shared` and `shared_flipped` are two different comparisons of the same pair of
+# overhangs, standing for two different reactions. These derive both from the sticky ends
+# themselves, so a change to either column has to survive the annealing arithmetic.
+
+_COMP = {"A": "T", "T": "A", "G": "C", "C": "G"}
+
+
+def _anneal(a: str, b: str) -> int:
+    """Watson-Crick pairs when two 5'->3' single-stranded overhangs meet antiparallel."""
+    return sum(x == _COMP[y] for x, y in zip(a, b[::-1]))
+
+
+def _sticky_ends(desc_5: str, desc_3: str) -> dict[str, str]:
+    """The four sticky ends a Golden Gate reaction actually presents, as ssDNA read
+    5'->3', from the two top-strand overhang descriptors.
+
+    A 5'-overhang cut leaves the right-hand fragment's overhang on the top strand and the
+    left-hand fragment's on the bottom strand. So the insert carries its 5' overhang on the
+    top strand and its 3' overhang on the bottom, and the cut vector carries the reverse
+    complement of each at the end that receives it.
+    """
+    return {
+        "insert_5": desc_5,
+        "insert_3": reverse_complement(desc_3),
+        "vector_x": reverse_complement(desc_5),   # normally takes the insert's 5' end
+        "vector_y": desc_3,                       # normally takes the insert's 3' end
+    }
+
+
+def test_the_intended_assembly_anneals_perfectly_at_both_junctions():
+    e = _sticky_ends("AAGC", "GGTG")
+    assert _anneal(e["insert_5"], e["vector_x"]) == 4
+    assert _anneal(e["insert_3"], e["vector_y"]) == 4
+
+
+def test_shared_scores_vector_re_ligation_and_shared_flipped_scores_flipping():
+    """The reported row for ends (AAGC, GGTG): 0 as written, 2 reverse-complemented.
+
+    Read left to right the bottom strand of the 5' locus (TTCG) and the top strand of the
+    3' (GGTG) look like they share a base, but that reading is not the alignment they
+    anneal in. Scored antiparallel, the cut vector cannot re-close on itself at all.
+    """
+    desc_5, desc_3 = "AAGC", "GGTG"
+    e = _sticky_ends(desc_5, desc_3)
+
+    assert _anneal(e["vector_x"], e["vector_y"]) == shared_bases(desc_5, desc_3) == 0
+    assert _anneal(e["insert_3"], e["vector_x"]) == \
+        shared_bases(desc_5, reverse_complement(desc_3)) == 2
+
+
+def test_both_columns_hold_for_every_overhang_pair():
+    from itertools import product
+
+    words = ["".join(p) for p in product("ACGT", repeat=4)]
+    for desc_5 in words:
+        for desc_3 in words[::37]:          # a spread of 7 partners each, keeps it quick
+            e = _sticky_ends(desc_5, desc_3)
+            # Intended assembly always works, whatever the pair.
+            assert _anneal(e["insert_5"], e["vector_x"]) == 4
+            assert _anneal(e["insert_3"], e["vector_y"]) == 4
+            # The cut vector closing on itself.
+            assert _anneal(e["vector_x"], e["vector_y"]) == shared_bases(desc_5, desc_3)
+            # The fragment going in backwards.
+            assert _anneal(e["insert_3"], e["vector_x"]) == \
+                shared_bases(desc_5, reverse_complement(desc_3))
+
+
+def test_a_pair_can_be_clean_one_way_and_not_the_other():
+    """Which is the reason for two columns. Identical ends re-ligate but do not flip;
+    reverse-complementary ends flip but do not re-ligate."""
+    same = _sticky_ends("AAGC", "AAGC")
+    assert _anneal(same["vector_x"], same["vector_y"]) == 4       # re-closes empty
+    assert _anneal(same["insert_3"], same["vector_x"]) == shared_bases(
+        "AAGC", reverse_complement("AAGC"))                        # not a flip risk
+
+    flip = _sticky_ends("AAGC", reverse_complement("AAGC"))
+    assert _anneal(flip["insert_3"], flip["vector_x"]) == 4        # goes in backwards
+    assert _anneal(flip["vector_x"], flip["vector_y"]) == shared_bases(
+        "AAGC", reverse_complement("AAGC"))                        # not a re-ligation risk

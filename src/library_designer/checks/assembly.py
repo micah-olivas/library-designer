@@ -1,4 +1,4 @@
-"""Simulate the Golden Gate reaction the design implies, as QC.
+"""Simulate the Golden Gate reaction a library implies, as QC.
 
 Every other check reads the sequences we wrote down. This one puts them together: cut the
 oligo with the enzyme, cut the destination vector, anneal the fused overhangs, ligate, and
@@ -10,15 +10,15 @@ we meant to build.
 Two levels of checking, which keeps a large library cheap. Once per reaction the whole
 plasmid is assembled from the frozen WT reference and compared against the starting vector
 with that reference in place. Then, because the only thing that differs between members of
-one reaction is the fragment core, every member is checked at coding-sequence level: splice
-its released core between the arms the vector supplies and the result has to be that
-variant's intended CDS, translating to its intended protein.
+one reaction is the fragment core, every member is checked at coding-sequence level. Join its
+released core to the arms the vector supplies and the result has to be that variant's
+intended CDS, translating to its intended protein.
 
 Without a destination vector there is no reaction to simulate, so nothing runs.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from ..regions import assemble, reverse_complement
 from .motifs import ENZYME_SITES, cut_geometry
@@ -138,7 +138,7 @@ class AssemblyResult:
 
     ``product`` is the plasmid it yields, built from the WT reference, so it is the clone you
     expect to sequence. It reads in the same frame as ``parent_vector`` and every
-    ``assembled_product``, so any two can be compared base for base. ``problems`` maps a
+    ``assembled_product``, so any two can be compared directly. ``problems`` maps a
     member's name to what went wrong for it, in
     words; everything not in there rebuilt its own intended coding sequence. ``n_aligned``
     counts members whose product, aligned against the parent vector, differs only at the
@@ -240,8 +240,9 @@ def align_to_parent(product: str, parent: str, cds_start: int, cds_len: int,
     return None
 
 
-def _spliced_cds(reference: str, insert: Fragment, start: int, end: int, o: int) -> str:
-    """The coding sequence of the ligated product: the arms the vector keeps, plus the
+def _ligated_cds(reference: str, insert: Fragment, start: int, end: int, o: int,
+                 pad_5: int = 0, pad_3: int = 0) -> str:
+    """The coding sequence of the ligated product: the arms the vector keeps, joined to the
     overhang bases and core the fragment brings.
 
     The fragment's core covers ``[start, end)`` of the coding sequence and its overhangs sit
@@ -249,7 +250,14 @@ def _spliced_cds(reference: str, insert: Fragment, start: int, end: int, o: int)
     of them are coding depends on where the cut fell: at an internal tile boundary all of
     them are, at a CDS end none are (the overhang is backbone), and an adaptor that spells
     only part of the overhang splits it between the two. ``min`` picks up all three cases, so
-    only the coding part is spliced in and the rest of the arm comes from the reference."""
+    only the coding part is taken from the fragment and the rest of the arm comes from
+    the reference.
+
+    ``pad_5`` / ``pad_3`` are backbone bases the adaptors re-supply, which ride inside the
+    fragment's core between the overhang and the coding sequence. They are not coding, so
+    they come off the core before any of this."""
+    if pad_5 or pad_3:
+        insert = replace(insert, core=insert.core[pad_5:len(insert.core) - pad_3 or None])
     coding_5 = min(start, o)                       # overhang bases that are coding sequence
     coding_3 = min(len(reference) - end, o)
     head = reference[: start - coding_5] + insert.left[o - coding_5:]
@@ -266,7 +274,7 @@ class _Plan:
     molecule that gets ordered)``. ``parent`` is the starting plasmid with the frozen
     reference in place, the baseline every product is aligned against, and None when there is
     no real backbone (a tiled cassette). ``dead`` carries a result that stands in for the
-    whole simulation when the design cannot be assembled at all."""
+    whole simulation when the library cannot be assembled at all."""
 
     reference: str
     enzyme: str
@@ -283,7 +291,8 @@ def _plan(library) -> _Plan | None:
     import pandas as pd
 
     from ..layout.tiled import wt_oligo
-    from ..layout.vector_io import assemble_vector, insert_offset, locating_kwargs, resolve_destination
+    from ..layout.destination import resolve_insert_locus
+    from ..layout.vector_io import assemble_vector, insert_offset, parent_region
 
     spec = library.spec
     reference = library.reference
@@ -309,7 +318,7 @@ def _plan(library) -> _Plan | None:
                 by_tile[int(ti)].append(_member(name, dna, idx, oligo))
         reactions = [(
             f"tile{t.index}", t.vector, t.topology, t.start, t.end, by_tile[t.index],
-            wt_oligo(reference, t, params),
+            wt_oligo(reference, t, params), 0, 0,      # a tile's window has no padding
         ) for t in tiles]
     else:
         vec = spec.vector
@@ -325,9 +334,15 @@ def _plan(library) -> _Plan | None:
             # checks/overhangs.py), and simulating anyway says concretely what the reaction
             # does with it rather than replacing every member's result with one message.
             dv = build_destination(library, strict=False)
-        except ValueError as exc:
-            return _Plan(reference, enzyme, o, proteins, [],
-                         dead=AssemblyResult("destination", enzyme, issues=[str(exc)]))
+        except ValueError:
+            # The same fault is already reported in full by checks/vector.py, which owns the
+            # adaptor-against-the-plasmid checks. Restating it here printed one root cause as
+            # two findings, so point at that one instead of echoing its message.
+            return _Plan(reference, enzyme, o, proteins, [], dead=AssemblyResult(
+                "destination", enzyme,
+                issues=["no assembly was simulated, because the destination vector could "
+                        "not be built; see the adaptor/destination-vector issue above"],
+            ))
         a5, a3 = spec.adaptor_5, spec.adaptor_3
         members = [
             _member(n, v, i, assemble(a5, v, a3))
@@ -335,7 +350,7 @@ def _plan(library) -> _Plan | None:
         ]
         reactions = [(
             "destination", dv.sequence, dv.topology, dv.start, dv.end, members,
-            assemble(a5, reference, a3),
+            assemble(a5, reference, a3), dv.dest.pad_5, dv.dest.pad_3,
         )]
 
     # The plasmid each reaction should yield, when a real backbone is in play. Without one the
@@ -343,9 +358,11 @@ def _plan(library) -> _Plan | None:
     # per-member coding-sequence check carries the simulation on its own.
     parent = cds_at = None
     if vec is not None:
-        dest = resolve_destination(vec.path, **locating_kwargs(spec, library.tiled_params))
-        parent = assemble_vector(dest, reference)      # the starting plasmid, WT CDS in place
-        cds_at = insert_offset(dest)
+        dest = resolve_insert_locus(spec, library.tiled_params)
+        # parent_region puts back any bases the locus was widened by, so the parent is the
+        # real starting plasmid and not one short by the adaptors' padding.
+        parent = assemble_vector(dest, parent_region(dest, reference))
+        cds_at = insert_offset(dest) + dest.pad_5
     return _Plan(reference, enzyme, o, proteins, reactions, parent, cds_at)
 
 
@@ -365,7 +382,7 @@ def assembled_products(library, names=None):
     """Yield ``(name, product, mut_index)`` for every member that assembles.
 
     The products come back in ``parent_vector``'s frame, so any of them can be diffed
-    against it base for base. The vector is digested once per reaction and the frame
+    against it directly. The vector is digested once per reaction and the frame
     rotation taken once from the WT product, so walking a whole library is cheap. Members
     that cannot be released or ligated are skipped, since ``check()`` is where those are
     reported. ``names`` restricts the walk to a set of member names."""
@@ -375,7 +392,7 @@ def assembled_products(library, names=None):
             "Nothing to assemble: needs a starting vector, adaptors carrying the enzyme "
             "sites, and a codon-optimized library."
         )
-    for label, vector, topology, _s, _e, members, wt_construct in plan.reactions:
+    for label, vector, topology, _s, _e, members, wt_construct, _p5, _p3 in plan.reactions:
         chosen = [m for m in members if names is None or m[0] in names]
         if not chosen:
             continue
@@ -401,7 +418,7 @@ def assembled_products(library, names=None):
 
 def assembled_product(library, name: str) -> str:
     """The plasmid member ``name`` assembles into, read in the same frame as
-    ``parent_vector`` so the two can be compared base for base.
+    ``parent_vector`` so the two can be compared.
 
     This is the simulated clone: its oligo digested, ligated into the cut destination
     vector, and rotated onto the parent's origin. Raises if the member has nothing to
@@ -434,7 +451,7 @@ def simulate(library) -> list[AssemblyResult]:
     reactions = plan.reactions
 
     results = []
-    for label, vector, topology, start, end, members, wt_construct in reactions:
+    for label, vector, topology, start, end, members, wt_construct, pad_5, pad_3 in reactions:
         r = AssemblyResult(label, enzyme, topology=topology, n_members=len(members))
         results.append(r)
 
@@ -486,7 +503,7 @@ def simulate(library) -> list[AssemblyResult]:
                     "anneals to the cut vector"
                 )
                 continue
-            got = _spliced_cds(reference, insert, start, end, o)
+            got = _ligated_cds(reference, insert, start, end, o, pad_5, pad_3)
             protein = proteins.get(name)
             if got != variant_cds:
                 r.problems[name] = "assembles to a different coding sequence than designed"
@@ -511,7 +528,7 @@ def simulate(library) -> list[AssemblyResult]:
 
 def _rotate(product: str, rotation: int) -> str:
     """A product read from ``rotation`` bases into the parent, re-read from the parent's own
-    origin, so the two line up base for base."""
+    origin, so the two line up."""
     return product if not rotation else product[-rotation:] + product[:-rotation]
 
 

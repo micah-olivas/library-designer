@@ -5,9 +5,10 @@ whether IDT's choice would introduce a restriction/ribosome-binding motif that o
 design deliberately avoids (IDT's optimizer doesn't know about your Golden Gate
 enzymes).
 
-Both sequences are compared as coding regions only (no adaptors). Submit the
-**truncated** protein to IDT, the one the reference encodes (``spec.truncated_sequence``);
-the comparison warns if the pasted sequence encodes a different protein.
+Both sequences are compared as coding regions only (no adaptors). Submit the protein the
+reference encodes (``spec.designed_sequence``) to IDT, which is the truncated protein when
+the spec sets ``truncation`` and the whole one otherwise. The comparison warns if the
+pasted sequence encodes a different protein.
 """
 from __future__ import annotations
 
@@ -31,7 +32,7 @@ class ReferenceComparison:
     species, where 1.0 would mean every codon is the most-used one for its residue.
 
     ``enzyme_sites`` and ``motif_hits`` count what the pasted sequence carries of the
-    things the design avoids, the enzymes in ``spec.avoid_enzymes`` and the patterns in
+    things the spec avoids, the enzymes in ``spec.avoid_enzymes`` and the patterns in
     ``spec.avoid_patterns``. Both count the pasted sequence only, since the reference was
     optimized to have none. ``introduces_sites`` is True when any count is nonzero.
 
@@ -121,8 +122,8 @@ def compare_reference(library, other_dna: str, label: str = "IDT") -> ReferenceC
     length is a multiple of 3, and a mismatch is written into ``protein_note`` rather
     than raised, so the rest of the report is still there to read. The note says which
     kind of mismatch it is, a length that is not a multiple of 3, a protein of the wrong
-    length (usually the full protein where the truncated one was wanted), or one that
-    differs at some number of residues.
+    length (with a truncated spec, usually the full protein where the truncated one was
+    wanted), or one that differs at some number of residues.
     """
     if library.reference is None:
         raise ValueError("Library is not codon-optimized yet, call codon_optimize() first.")
@@ -146,8 +147,15 @@ def compare_reference(library, other_dna: str, label: str = "IDT") -> ReferenceC
         if prot_other is None:
             note = f"{label} length {len(other)} nt is not a multiple of 3."
         elif len(prot_other) != len(prot_ref):
-            note = (f"{label} encodes {len(prot_other)} aa but the reference is {len(prot_ref)} aa. "
-                    f"Submit the truncated protein (truncation={spec.truncation}), not the full one.")
+            # Only blame truncation when the spec truncates; otherwise the two are just
+            # different proteins and telling the user to truncate would send them wrong.
+            hint = (
+                f"Submit the truncated protein (truncation={spec.truncation}), not the full one."
+                if spec.truncation
+                else "Submit the protein the reference encodes (spec.designed_sequence)."
+            )
+            note = (f"{label} encodes {len(prot_other)} aa but the reference is "
+                    f"{len(prot_ref)} aa. {hint}")
         else:
             d = sum(a != b for a, b in zip(prot_ref, prot_other))
             note = f"{label} encodes a protein differing at {d} residue(s) from the reference."

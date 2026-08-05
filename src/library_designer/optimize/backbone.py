@@ -1,15 +1,29 @@
 """Backbone-and-stamp optimization for single-substitution libraries.
 
 Codon-optimize the wild-type CDS **once** into a frozen reference, then build each
-variant by overwriting only its target codon ("stamping"). Every member is then
-byte-identical to the reference except at its intended position, the single-WT-
-reference invariant that uSort-M mapping and clean single-mutant interpretation
-depend on. (Optimizing each variant independently does not guarantee this: with a
-usage-matching method, unchanged positions drift apart across variants.)
+variant by overwriting only its target codon ("stamping").
 
-The stamped codon is chosen by a *local, usage-ranked* pick: try the target
-residue's codons from most- to least-frequent and take the first that introduces
-no restricted motif (BsaI site / Shine-Dalgarno). The backbone is never re-touched.
+Three rules govern how a variant's DNA is designed.
+
+1. **Only the mutated codon changes.** No step of the design edits a base outside the
+   codon a variant is meant to mutate, including to make room for a motif elsewhere. Every
+   member matches the reference apart from its own codon, which is what uSort-M mapping and
+   single-mutant interpretation need: an edit elsewhere means a phenotype cannot be
+   attributed to the substitution. Optimizing each variant independently does not give
+   this, since a usage-matching method chooses different codons at unchanged positions in
+   different members. Checked at runtime by ``checks/report.off_target_edits``.
+2. **A blocked codon steps down the ranking.** When the preferred codon for the target
+   residue would introduce a restricted motif (a Golden Gate site, a Shine-Dalgarno
+   motif), try that residue's codons from most- to least-frequent and take the first
+   that does not. Only the mutated codon changes.
+   ``spec.optimization.synonymous_fallback = False`` opts out of the stepping, for callers
+   who would rather be told about the position than build it at a rarer codon.
+3. **Exhausting the codons raises a flag.** If no codon for the residue avoids the
+   motif, the variant is not built. It is recorded in ``lib.failed`` with the reason,
+   its ``variable_dna`` is NA, and QC reports it under ``optimization_failed``. It is not
+   placed, and the backbone is not edited to fit it, which rule 1 forbids. A pinned literal
+   codon (an amber ``TAG``) has no synonymous alternative, so it reaches this case at
+   once.
 """
 from __future__ import annotations
 
@@ -27,7 +41,7 @@ _RANKED_CACHE: dict[str, dict[str, list[str]]] = {}
 
 
 def _frequencies(species: str) -> dict[str, dict[str, float]]:
-    """Pristine {aa: {codon: freq}} for the species, isolated from DNA Chisel.
+    """Unmodified {aa: {codon: freq}} for the species, kept apart from DNA Chisel's copy.
 
     ``python_codon_tables.get_codons_table`` is ``lru_cache``d and returns a shared
     dict that DNA Chisel mutates in place (to log-space) during optimization. We
@@ -51,8 +65,8 @@ def _cds_from_vector(spec: LibrarySpec) -> str:
     located region must be in-frame and encode the protein (otherwise the locus is
     wrong), but its SD sites, motifs, and even internal BsaI are kept, not recoded.
     They are surfaced as advisories by QC (see checks/tiled.py); an internal BsaI is
-    a real assembly hazard and is reported at critical severity there, but it is a
-    flag, not an error, because the user chose this sequence.
+    a real assembly hazard and is reported at critical severity there, as a flag
+    rather than an error, since the user chose the sequence.
     """
     from ..layout.vector_io import locating_kwargs, resolve_destination
 
@@ -67,15 +81,15 @@ def build_reference(spec: LibrarySpec, seed: int | None = None) -> str:
     ``use_vector_cds`` is set (verbatim, advisory QC); an explicit ``spec.cds``
     (verbatim native sequence, e.g. a human gene whose exact codons matter); otherwise
     the protein is codon-optimized once. A verbatim CDS is validated, it must be ACGT,
-    in-frame, and encode the (truncated) protein. A ``spec.cds`` is additionally checked
+    in-frame, and encode ``spec.designed_sequence``. A ``spec.cds`` is additionally checked
     to be free of the Golden Gate / avoided enzyme sites, since for that path we will
     not silently recode a reference the user chose. Errors are raised, not swallowed,
-    because a bad reference poisons every variant.
+    because a bad reference makes every variant wrong.
     """
     vec = spec.vector
     from_vector = bool(vec and vec.use_vector_cds)
     if spec.cds is None and not from_vector:
-        return codon_optimize(spec.truncated_sequence, spec, seed=seed)
+        return codon_optimize(spec.designed_sequence, spec, seed=seed)
 
     from dnachisel import translate
 
@@ -87,11 +101,11 @@ def build_reference(spec: LibrarySpec, seed: int | None = None) -> str:
         raise ValueError(f"{source} must contain only A/C/G/T.")
     if len(cds) % 3 != 0:
         raise ValueError(f"{source} length ({len(cds)}) is not a multiple of 3.")
-    protein = spec.truncated_sequence
+    protein = spec.designed_sequence
     got = translate(cds)
     if got != protein:
         raise ValueError(
-            f"{source} does not translate to the (truncated) protein_sequence: "
+            f"{source} does not translate to {spec.protein_description()}: "
             f"{sum(a != b for a, b in zip(got, protein))} residue(s) differ "
             f"(it encodes {len(got)} aa, protein is {len(protein)} aa)."
         )
@@ -138,7 +152,7 @@ def relative_adaptiveness(species: str) -> dict[str, float]:
 def codon_frequency(species: str) -> dict[str, float]:
     """{codon: absolute usage frequency} for the species (pristine, isolated from
     DNA Chisel). Unlike relative adaptiveness, this varies position to position even
-    under use_best_codon, so it shows the actual codon-usage landscape."""
+    under use_best_codon, so it shows the actual per-position usage."""
     return {c: f for codons in _frequencies(species).values() for c, f in codons.items()}
 
 
@@ -186,18 +200,33 @@ def _violates(cds: str, spec: LibrarySpec, reference: str | None = None) -> bool
 def _stamp(reference: str, index: int, symbol: str, pinned: str | None,
            ranked: dict[str, list[str]], spec: LibrarySpec):
     """Overwrite the codon at ``index`` on the reference. Returns (cds, None) or
-    (None, error). Sense residues try synonymous codons usage-first; a pinned codon
-    (e.g. amber TAG) is placed verbatim, if it can't avoid a motif, it's flagged."""
+    (None, error).
+
+    A pinned codon (e.g. amber TAG) is placed verbatim, and if it can't avoid a motif it
+    is flagged, since there is no synonymous alternative. A sense residue depends on
+    ``spec.optimization.synonymous_fallback``: on (the default) it tries that residue's
+    codons most- to least-frequent and takes the first that avoids a motif; off, it tries
+    the preferred codon only and flags the variant rather than quietly using a rarer one.
+    """
     start = index * 3
     candidates = [pinned] if pinned else ranked.get(symbol)
     if not candidates:
         return None, f"no codons known for residue {symbol!r}"
+    fallback = spec.optimization.synonymous_fallback
+    if not pinned and not fallback:
+        candidates = candidates[:1]      # the preferred codon, take it or flag it
     for codon in candidates:
         cds = reference[:start] + codon + reference[start + 3:]
         if not _violates(cds, spec, reference):
             return cds, None
-    what = f"pinned codon {pinned}" if pinned else f"any synonymous codon for {symbol}"
-    return None, f"{what} at position {index + 1} introduces a restricted motif"
+    if pinned:
+        what, why = f"pinned codon {pinned}", ""
+    elif fallback:
+        what, why = f"any synonymous codon for {symbol}", ""
+    else:
+        what = f"the preferred codon {candidates[0]} for {symbol}"
+        why = "; synonymous_fallback is off, so no rarer codon was tried"
+    return None, f"{what} at position {index + 1} introduces a restricted motif{why}"
 
 
 def optimize_library(library, seed: int | None = None):

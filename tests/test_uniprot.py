@@ -2,7 +2,7 @@
 
 The download is replaced throughout, so the suite never touches the network. What is
 exercised is everything around it: the header parse, the disk cache, the accession guard,
-the error messages, and how a resolved entry lands on the spec and in the design record.
+the error messages, and how a resolved entry lands on the spec and in the design specs.
 """
 from __future__ import annotations
 
@@ -160,6 +160,6 @@ def test_the_design_record_says_where_the_protein_came_from(offline):
 
     assert recorded["uniprot"] == "P07311"
     assert recorded["uniprot_entry"]["entry_name"] == "ACYP1_HUMAN"
-    # The sequence is stored too, so the design does not depend on UniProt to be rebuilt.
+    # The sequence is stored too, so the library does not depend on UniProt to be rebuilt.
     assert recorded["protein_sequence"] == SEQUENCE
     assert len(lib) == 98 * 1 - sum(1 for r in SEQUENCE[1:] if r == "A") + 1

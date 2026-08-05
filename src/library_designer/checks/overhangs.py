@@ -1,35 +1,45 @@
-"""The fused Golden Gate overhangs a design leaves, and how well they tell each other apart.
+"""The fused Golden Gate overhangs a design leaves, and whether they are distinct.
 
-A Type IIS reaction is only directional if the overhangs it works with are distinct. Two
-failure modes follow from overhangs that are too much alike.
+A Type IIS reaction is only directional if its overhangs are distinct. Overhangs that are too
+alike fail two ways.
 
-* The cut vector's own two ends anneal to each other and it re-closes empty. That is a
-  unimolecular reaction, so even a poor match gives a strong background of parent plasmid.
+* The cut vector's own two ends anneal and it re-closes empty. That reaction is
+  unimolecular, so even a poor match gives parent-plasmid background.
 * The insert anneals the other way round and goes in backwards, giving a clone with the
   tile reverse-complemented.
 
-Both are read off the same number, how many aligned bases two overhangs share. The target
-here is at most 1 shared base out of 4, which is the orthogonality a designed overhang set
-is chosen for. Sharing all 4 makes the wrong product the expected one, so it fails QC.
-Sharing 3, a single mismatch, is the case T4 ligase actually joins at a measurable rate, so
-it is called out by name. Sharing 2 is above target but not a real hazard on its own, so it
-is only counted, and the full table is where it gets reviewed.
+Those are separate reactions, so the same pair of overhangs gets two comparisons. Every
+overhang here is written on the top strand, the convention where two ends join when their
+sequences are equal. The cut vector re-closes when the two are equal as written, reported by
+``pair_table`` as ``shared``. The fragment flips when one equals the reverse complement of the
+other, reported as ``shared_flipped``. A pair can be clean on one and a hazard on the other,
+so check both.
 
-Only the exact case fails because a tiled design does not choose its overhangs. They are
-read off the CDS at the tile boundaries, so the fix for a near-match is to move the boundary
-with ``tiled.tile_size``, not to pick different bases.
+Deriving the two numbers from the sticky ends gives the same answer. A 5'-overhang cut leaves
+the insert's 5' overhang on the top strand and its 3' on the bottom, so the cut vector
+presents the reverse complement of each. Comparing one of those strands against the other as
+they read left to right counts identities in a frame that anneals by complementarity, which
+overcounts: ends (AAGC, GGTG) appear to share a base if TTCG is set against GGTG that way,
+while the vector's real ends, GCTT and GGTG, have no complementary base in the alignment they
+meet in.
 
-**The unit of concern is one tile.** Each tile is amplified out of the pool with its own
-primer pair and assembled into its own destination vector, so a tile's reaction contains its
-own fragments and nothing else. Tile 0's overhangs and tile 3's overhangs never meet, and
-they cannot be pooled either, since every tile needs the particular vector carrying the rest
-of the CDS around its own window. So the only comparisons that mean anything are a tile's two
-ends against each other, and each end against its own reverse complement. Cross-tile pairs
-are listed when asked for, and left ungraded.
+Aim for at most 1 shared base of 4, the orthogonality a designed overhang set is chosen for.
+Sharing all 4 fails QC, since the wrong product dominates. Sharing 3, a single mismatch, is
+the case T4 ligase joins at a measurable rate, so it is reported individually. Sharing 2 is
+above target but not a hazard by itself, so it is counted and reviewed in the full table.
 
-``overhang_table`` gives one row per end and ``pair_table`` one row per pair of ends, which
-is what a notebook shows. ``overhang_findings`` turns the same numbers into the strings QC
-prints.
+Only the exact case fails, because a tiled design does not choose its overhangs. They are read
+off the CDS at the tile boundaries, so the fix for a near-match is to move the boundary with
+``tiled.tile_size`` rather than pick different bases.
+
+Each tile is its own reaction. It is amplified out of the pool with its own primer pair and
+assembled into its own destination vector, and it cannot be pooled with another, since every
+tile needs the vector carrying the rest of the CDS around its own window. So only a tile's two
+ends against each other, and each end against its own reverse complement, are compared.
+Cross-tile pairs are listed when asked for, and left ungraded.
+
+``overhang_table`` gives one row per end and ``pair_table`` one row per pair of ends, which is
+what a notebook shows. ``overhang_findings`` turns the same numbers into the strings QC prints.
 """
 from __future__ import annotations
 
@@ -71,7 +81,7 @@ def shared_bases(a: str, b: str) -> int:
 
 
 def overhang_ends(library) -> list[OverhangEnd]:
-    """Every fused overhang the design leaves, in reaction order.
+    """Every fused overhang the library leaves, in reaction order.
 
     A tiled library has two per tile, read off the CDS at the tile boundaries or off the
     backbone where a tile abuts a CDS end. A standard library cloned into a starting vector
@@ -97,7 +107,7 @@ def overhang_ends(library) -> list[OverhangEnd]:
         from ..layout.destination import build_destination
 
         try:
-            # strict=False, since reporting the collision is the whole point of this table.
+            # strict=False, since this table exists to report the collision.
             dv = build_destination(library, strict=False)
         except ValueError:
             # A geometry problem the vector check already reports. Nothing to describe here.
@@ -121,7 +131,7 @@ def risk_of(shared: int, width: int) -> str:
 
     ``"collision"`` when they match at every base, so the wrong product is the expected one.
     ``"high"`` at one mismatch, which T4 ligase joins at a rate you will see on a plate.
-    ``"watch"`` above ``MAX_SHARED``, worth a look but not a hazard by itself. ``"ok"``
+    ``"watch"`` above ``MAX_SHARED``, above target but not a hazard by itself. ``"ok"``
     otherwise."""
     if shared >= width:
         return "collision"
@@ -137,7 +147,7 @@ def self_risk(shared: int, width: int) -> str:
     positions up when compared with its own reverse complement, so the count can only come
     out even. A 4 bp overhang scores 4 (palindromic, and it concatemerizes), 2 (two
     mismatches, which does not anneal), or 0. Reading 2 as "above target" the way a pair is
-    read would flag more than a third of all overhangs for nothing, so only a full or
+    read would flag over a third of all overhangs, so only a full or
     near-full match counts here.
     """
     if shared >= width:

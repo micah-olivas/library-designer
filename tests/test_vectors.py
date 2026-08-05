@@ -478,7 +478,7 @@ def test_cut_falling_inside_the_coding_region_is_reported(tmp_path):
 
 def test_no_adaptors_is_an_advisory_not_a_failure(tmp_path):
     """A pool with no cloning flanks still gets a destination vector (whole CDS dropped
-    out, overhangs from the backbone), and QC says so without failing the design."""
+    out, overhangs from the backbone), and QC says so without failing the library."""
     lib = _standard_lib(_plasmid(tmp_path, CLEAN_CDS), "", "")
     rep = lib.check()
     assert rep.passed and not rep.adaptor_issues
@@ -662,7 +662,7 @@ def test_edited_plasmid_file_is_read_again_not_served_from_cache(tmp_path):
 # --- what the destination vector says about itself ----------------------------
 
 def test_the_destination_vector_prints_a_readable_summary(tmp_path):
-    """Evaluating it in a notebook should say everything the design turns on, without the
+    """Evaluating it in a notebook should say everything the library turns on, without the
     caller reaching into dv.dest and dv.cut to print it themselves."""
     lib = _standard_lib(_plasmid(tmp_path, CLEAN_CDS), A5_BACKBONE, A3_BACKBONE)
     dv = lib.destination_vector()
@@ -703,3 +703,78 @@ def test_the_summary_flags_a_minus_strand_insert(tmp_path):
     lib = _standard_lib(_plasmid(tmp_path, CLEAN_CDS, reverse=True),
                         "GGCGC" + "GGTCTC" + "A" + BB5[-4:], A3_BACKBONE)
     assert "insert on the minus strand" in str(lib.destination_vector())
+
+
+# --- backbone padding: sliding the fused overhang off the junction ---------------
+#
+# An adaptor may spell a few bases past its fused overhang. Those bases are backbone, the
+# oligo carries them, so the destination vector gives them up and the overhang window slides
+# into the backbone. This is the only direction open to a saturating scan: an overhang drawn
+# from coding bases breaks the variants that mutate them.
+
+# One base of padding at each end. The pad bases are the backbone's own, so the product is
+# still the parent with the CDS swapped, but the overhang window has moved by one.
+A5_PAD = "GGCGC" + "GGTCTC" + "A" + BB5[-5:]              # keep_5 = 5, overhang = BB5[-5:-1]
+A3_PAD = BB3[:5] + "T" + reverse_complement("GGTCTC") + "GCGCC"   # keep_3 = 5, overhang = BB3[1:5]
+
+
+def test_padding_is_read_off_the_adaptors(tmp_path):
+    from library_designer.layout.destination import adaptor_padding
+
+    lib = _standard_lib(_plasmid(tmp_path, CLEAN_CDS), A5_PAD, A3_PAD)
+    assert adaptor_padding(lib.spec) == (1, 1)
+    # The unpadded convention asks for nothing.
+    plain = _standard_lib(_plasmid(tmp_path, CLEAN_CDS, name="q.gb"), A5_BACKBONE, A3_BACKBONE)
+    assert adaptor_padding(plain.spec) == (0, 0)
+
+
+def test_padding_slides_the_overhang_window_into_the_backbone(tmp_path):
+    padded = _standard_lib(_plasmid(tmp_path, CLEAN_CDS), A5_PAD, A3_PAD)
+    plain = _standard_lib(_plasmid(tmp_path, CLEAN_CDS, name="q.gb"), A5_BACKBONE, A3_BACKBONE)
+
+    dv, dv0 = padded.destination_vector(), plain.destination_vector()
+    assert (dv0.overhang_5, dv0.overhang_3) == (BB5[-4:], BB3[:4])       # at the junction
+    assert (dv.overhang_5, dv.overhang_3) == (BB5[-5:-1], BB3[1:5])      # one base along
+    # And the oligo carries what the vector presents, which is the point of moving both.
+    assert dv.overhangs_match
+    # The vector gave up the padding bases, so its drop-out is 2 bases wider than the CDS.
+    assert dv.dest.pad_5 == 1 and dv.dest.pad_3 == 1
+    assert dv.dest.end - dv.dest.start == len(padded.reference) + 2
+
+
+def test_a_padded_library_assembles_back_to_the_parent(tmp_path):
+    """The oligo re-supplies the bases the vector dropped, so every clone is the starting
+    plasmid with its own CDS in it."""
+    lib = _standard_lib(_plasmid(tmp_path, CLEAN_CDS), A5_PAD, A3_PAD)
+    rep = lib.check()
+    assert rep.passed, rep.issues
+    assert rep.assembly_correct == rep.assembly_checked == len(lib.df)
+    assert rep.assembly_aligned == rep.assembly_checked
+    # The simulated WT clone is the parent plasmid.
+    assert lib.assembled_product("WT") == lib.parent_vector()
+
+
+def test_padding_that_does_not_match_the_plasmid_is_refused(tmp_path):
+    """The padding bases end up in the product, so they have to be the plasmid's own. A
+    mismatch would change the backbone, so it is raised naming both sequences."""
+    wrong = "A" + BB3[1:5] + "T" + reverse_complement("GGTCTC") + "GCGCC"
+    assert wrong[0] != BB3[0]                      # the pad base disagrees, the overhang does not
+    with pytest.raises(ValueError, match="past its fused overhang"):
+        _standard_lib(_plasmid(tmp_path, CLEAN_CDS), A5_BACKBONE, wrong).destination_vector()
+
+
+def test_padding_leaves_the_reference_cds_alone(tmp_path):
+    """Widening the locus must not reach the reference: use_vector_cds still extracts the
+    coding region, not the coding region plus padding."""
+    from library_designer import StartingVectorParams
+
+    path = _plasmid(tmp_path, CLEAN_CDS)
+    spec = LibrarySpec(
+        name="syn", protein_sequence=_protein(CLEAN_CDS), substitutions=["A"],
+        adaptor_5=A5_PAD, adaptor_3=A3_PAD,
+        starting_vector=StartingVectorParams(path=path, insert_label="insert",
+                                             use_vector_cds=True),
+    )
+    lib = SubstitutionScan(spec).generate().codon_optimize()
+    assert lib.reference == CLEAN_CDS               # not CLEAN_CDS plus a backbone base
+    assert translates_to(lib.reference, _protein(CLEAN_CDS))

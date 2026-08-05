@@ -82,6 +82,33 @@ def df_preview_html(df, numeric: set[str] | None = None, maxlen: int = 28) -> st
             f"<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>")
 
 
+def _ruler(lo: int, hi: int, column, step: int = 10) -> tuple[str, str]:
+    """A coordinate line and a tick line for bases ``lo`` to ``hi - 1``, both 0-based.
+
+    ``column(i)`` says which screen column base ``i`` prints at, so the ruler stays honest
+    about which character is which base even when the sequence line has brackets in it.
+    Ticks land on the 1-based coordinates that are multiples of ``step``. A number ends at
+    its own tick, or starts there when ending there would run it off the left of the line.
+    """
+    nums: list[str] = []
+    ticks: list[str] = []
+
+    def place(row: list[str], text: str, at: int) -> None:
+        row += " " * (at + len(text) - len(row))
+        row[at:at + len(text)] = text
+
+    for i in range(lo, hi):
+        pos = i + 1
+        if pos % step:
+            continue
+        col = column(i)
+        place(ticks, "|", col)
+        label = str(pos)
+        start = col - len(label) + 1
+        place(nums, label, start if start >= column(lo) else col)
+    return "".join(nums), "".join(ticks)
+
+
 # --------------------------------------------------------------------------- #
 # The three worked libraries. Built once each and reused across the artifacts.
 # --------------------------------------------------------------------------- #
@@ -272,11 +299,21 @@ def art_clone_diff(tmp: Path) -> str:
     pad = 21
     a, b = max(0, lo - pad), min(len(parent), hi + pad)
     marker = "".join("^" if a + i in diffs else " " for i in range(b - a))
-    text = (f"{name}: {len(diffs)} base(s) differ, at {lo + 1}-{hi} of {len(parent)} bp\n\n"
-            f"parent  {parent[a:lo]}[{parent[lo:hi]}]{parent[hi:b]}\n"
-            f"clone   {clone[a:lo]}[{clone[lo:hi]}]{clone[hi:b]}\n"
-            f"        {' ' * (lo - a)} {marker[lo - a:hi - a]}")
-    return f'<pre class="out-text">{escape(text)}</pre>'
+    gutter = len("parent  ")
+
+    def column(i: int) -> int:
+        """Where base ``i`` lands once the gutter and the brackets are counted in."""
+        return gutter + (i - a) + (1 if i >= lo else 0) + (1 if i >= hi else 0)
+
+    nums, ticks = _ruler(a, b, column)
+    rows = [nums, ticks] if ticks.strip() else []   # a plasmid too short to hold a tick
+    rows += [
+        f"parent  {parent[a:lo]}[{parent[lo:hi]}]{parent[hi:b]}",
+        f"clone   {clone[a:lo]}[{clone[lo:hi]}]{clone[hi:b]}",
+        f"        {' ' * (lo - a)} {marker[lo - a:hi - a]}",
+    ]
+    head = f"{name}: {len(diffs)} base(s) differ, at {lo + 1}-{hi} of {len(parent)} bp"
+    return f'<pre class="out-text">{escape(head)}\n\n{escape(chr(10).join(rows))}</pre>'
 
 
 def art_overhang_matrix() -> str:

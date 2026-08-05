@@ -1,6 +1,6 @@
 """The Library container: a pandas DataFrame of variants plus the spec and seed
-needed to regenerate it (the design-specs record). Fluent methods make it read naturally in a
-notebook: ``SubstitutionScan(spec).generate().codon_optimize()``.
+needed to regenerate it (the design-specs record). Methods return the library, so a run chains:
+``SubstitutionScan(spec).generate().codon_optimize()``.
 """
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ class Library:
     state derived from both.
 
     You get one from a generator's ``generate()`` rather than building it yourself, then
-    chain the pipeline methods, which return the library so a run reads as one line::
+    chain the pipeline methods, which return the library, so a run reads as one line::
 
         lib = SubstitutionScan(spec).generate().codon_optimize()
 
@@ -201,9 +201,11 @@ class Library:
 
         - ``"scan"`` (SubstitutionScan): optimize the WT CDS **once** into a frozen
           reference, then stamp each variant's single target codon onto it. Every
-          member is then byte-identical to the reference except at its intended
+          member then matches the reference except at its intended
           position. The stamped codon is chosen usage-first, stepping to a rarer
-          synonymous codon only to avoid a restricted motif.
+          synonymous codon only to avoid a restricted motif. Set
+          ``spec.optimization.synonymous_fallback = False`` to refuse that step and
+          have such a position reported as a failure instead.
         - ``"sequence_set"`` (SequenceSet): each member is an independent full-length
           protein, so each is codon-optimized on its own (no shared reference).
 
@@ -300,8 +302,8 @@ class Library:
         One WT member per tile is appended, ``WT_Tile_0`` and so on, each carrying its
         tile's window straight from the reference. Every tile is amplified out of the pool
         and assembled on its own, so a sublibrary without one has nothing unmutated to
-        normalize against. The global ``WT`` row stays as the design record and rides on no
-        oligo. Set ``tiled.wt_controls = False`` to order only the mutants.
+        normalize against. The global ``WT`` row stays in the table for the record and rides
+        on no oligo. Set ``tiled.wt_controls = False`` to order only the mutants.
 
         Needs a codon-optimized library, since the tiles are cut from the frozen
         reference. The params it resolves, with the terminal overhangs filled in from the
@@ -431,7 +433,7 @@ class Library:
 
         The simulated clone for that member: its oligo digested, ligated into the cut
         destination vector, and rotated onto the parent's origin, so the two sequences line
-        up base for base and can be diffed directly."""
+        up and can be diffed directly."""
         from .checks.assembly import assembled_product
 
         return assembled_product(self, name)
@@ -464,33 +466,45 @@ class Library:
 
         return pair_table(self, all_pairs=all_pairs)
 
-    def plot_overhangs(self):
+    def plot_overhangs(self, dpi: int | None = None):
         """Return a Figure of overhang homology, every end against every other (renders
         inline in a notebook). Needs a design with a Golden Gate reaction, so ``tile()`` or a
-        starting vector first."""
-        from .viz import overhang_figure
+        starting vector first. ``dpi`` raises the resolution for a printable copy."""
+        from .viz import DEFAULT_DPI, overhang_figure
 
-        return overhang_figure(self)
+        return overhang_figure(self, dpi=dpi or DEFAULT_DPI)
 
-    def check(self):
+    def check(self, fmt: str = "report"):
         """Run QC (optimization, translation, forbidden sites, length), returning a ``CheckReport``.
 
-        Those four run for every library, and the design adds to them. A tiled library gets
+        Those four run for every library, and the rest depend on what it is. A tiled library gets
         the per-oligo and per-tile-vector checks, a standard library with a starting vector
         gets its adaptors checked against the plasmid, and either one gets the assembly
         simulated end to end, digested, ligated, and aligned against the parent. Raises if
         the library has not been codon-optimized.
+
+        ``fmt`` picks what you get back. ``"report"`` (the default) is the ``CheckReport``
+        itself, which prints as the readable report and carries ``passed``, ``issues``, and
+        ``advisories``. ``"text"`` is that report as a plain string, for a log file or an
+        email. ``"dict"`` is plain data, every field plus ``passed`` and the two parsed
+        views, ready for JSON or a DataFrame.
         """
+        if fmt not in ("report", "text", "dict"):
+            raise ValueError(f"Unknown fmt {fmt!r} (use 'report', 'text', or 'dict').")
         from .checks import check_library
 
-        return check_library(self)
+        report = check_library(self)
+        if fmt == "text":
+            return report.text()
+        return report.to_dict() if fmt == "dict" else report
 
     def compare_reference(self, other_dna: str, label: str = "IDT"):
         """Cross-check an externally codon-optimized WT CDS (e.g. pasted from IDT's
         Codon Optimization Tool) against this library's frozen reference, returning a
         ``ReferenceComparison``: codon agreement, GC, mean adaptiveness, and any
         BsaI/BsmBI/Shine-Dalgarno sites the external sequence would introduce that our
-        design avoids. Submit the truncated protein (``spec.truncated_sequence``) to IDT."""
+        design avoids. Submit the protein the reference encodes
+        (``spec.designed_sequence``) to IDT."""
         from .compare import compare_reference
 
         return compare_reference(self, other_dna, label=label)
@@ -503,32 +517,59 @@ class Library:
         return summarize(self)
 
     def plot_codon_usage(self, metric: str = "frequency", compare: str | None = None,
-                         compare_label: str = "IDT"):
+                         compare_label: str = "IDT", dpi: int | None = None):
         """Return a codon-usage QC Figure (renders inline in a notebook). ``metric`` is
         'frequency' (absolute usage, default) or 'adaptiveness'. Pass ``compare`` an
         external CDS (e.g. IDT's WT optimization) to overlay it as a dashed line. Needs the
-        one shared reference a scan has, so it does not apply to a ``SequenceSet``."""
-        from .viz import codon_usage_figure
+        one shared reference a scan has, so it does not apply to a ``SequenceSet``. ``dpi``
+        raises the resolution for a printable copy."""
+        from .viz import DEFAULT_DPI, codon_usage_figure
 
-        return codon_usage_figure(self, metric=metric, compare=compare, compare_label=compare_label)
+        return codon_usage_figure(self, metric=metric, compare=compare,
+                                  compare_label=compare_label, dpi=dpi or DEFAULT_DPI)
 
-    def plot_tiling(self):
+    def plot_codon_matrix(self, log: bool = True, reference_only: bool = False,
+                          dpi: int | None = None):
+        """Return a codon-map Figure (renders inline in a notebook): which codon sits at
+        every position of the CDS.
+
+        Codons run down the y axis grouped by amino acid, each group banded and ordered
+        most- to least-used in the host, so a codon drawn low in its own band is one the
+        design had to compromise on. A cell counts the members carrying that codon there, so
+        the frozen reference reads as a path and each stamped substitution as a mark off it.
+        ``reference_only=True`` plots the reference alone; ``log=False`` uses a linear colour
+        scale, which suits a ``SequenceSet`` whose members spread more evenly. Cells are a
+        couple of pixels wide, so raise ``dpi`` for a long CDS or a printable copy."""
+        from .viz import DEFAULT_DPI, codon_matrix_figure
+
+        return codon_matrix_figure(self, log=log, reference_only=reference_only,
+                                   dpi=dpi or DEFAULT_DPI)
+
+    def plot_tiling(self, dpi: int | None = None):
         """Return a tile-layout Figure (renders inline in a notebook). Needs a tiled
-        library, call ``tile()`` first."""
-        from .viz import tiling_figure
+        library, call ``tile()`` first. ``dpi`` raises the resolution for a printable copy."""
+        from .viz import DEFAULT_DPI, tiling_figure
 
-        return tiling_figure(self)
+        return tiling_figure(self, dpi=dpi or DEFAULT_DPI)
 
-    def to_qc_plots(self, path: str | Path) -> "Library":
-        """Save the codon-usage QC figure to an image file (format from extension)."""
-        from .viz import codon_usage_figure
+    def _save_figure(self, fig, path: str | Path, dpi: int | None = None) -> None:
+        """Write a figure and drop it, so a long export does not accumulate open figures.
 
-        fig = codon_usage_figure(self)
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(path, dpi=150, bbox_inches="tight")
+        With no ``dpi`` the file inherits the figure's own, so one number governs how a plot
+        looks inline and on disk instead of the two drifting apart."""
         import matplotlib.pyplot as plt
 
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(path, dpi=dpi or fig.dpi, bbox_inches="tight")
         plt.close(fig)
+
+    def to_qc_plots(self, path: str | Path, dpi: int | None = None) -> "Library":
+        """Save the codon-usage QC figure to an image file (format from extension). The
+        codon map is a separate figure; see ``plot_codon_matrix``. ``export_all`` writes
+        both. ``dpi`` sets the resolution of the file."""
+        from .viz import DEFAULT_DPI, codon_usage_figure
+
+        self._save_figure(codon_usage_figure(self, dpi=dpi or DEFAULT_DPI), path)
         return self
 
     def drop_failed(self) -> "Library":
@@ -581,6 +622,18 @@ class Library:
         with one assembled oligo per placed variant. Names are validated as for uSort-M.
         Needs a tiled library, so call ``tile()`` first."""
         _io.to_oligo_pool(self, path)
+        return self
+
+    def to_oligo_files(self, directory: str | Path, fmt: str = "genbank") -> "Library":
+        """Write one file per ordered oligo into ``directory``, named for the variant.
+
+        Each file holds the sequence the order carries, so a tiled library writes its
+        assembled oligo and anything else writes the whole construct with adaptors.
+        ``fmt`` is ``"genbank"`` (annotated with the coding stretch, the mutated codon, and
+        the Type IIS sites), ``"fasta"`` (sequence only), or ``"both"``. ``export_all``
+        already writes these to ``oligos/``, so call this yourself to put them somewhere
+        else or in the other format."""
+        _io.to_oligo_files(self, directory, fmt=fmt)
         return self
 
     def to_primer_order(self, path: str | Path, scale: str = "25nm",
@@ -674,11 +727,20 @@ class Library:
         return self
 
     def export_all(self, output_dir: str | Path, method: str | None = None,
-                   plots: bool = True, timestamp: bool = True, vectors: bool = True) -> "Library":
+                   plots: bool = True, timestamp: bool = True, vectors: bool = True,
+                   oligos: bool = True, oligo_fmt: str = "genbank",
+                   dpi: int | None = None) -> "Library":
         """Write the full output set: master CSV, uSort-M ``variants.csv``, vendor order
         form, the design-specs JSON (``<name>_design_specs.json``, the record uSort-M
-        reads), and the codon-usage QC plot. The plot is best-effort; if it can't be
-        rendered the data files still export (with a warning).
+        reads), and two QC plots: codon usage along the CDS and the codon map (which codon
+        sits at each position, grouped by amino acid). Plots are best-effort; if one can't be
+        rendered the data files still export (with a warning). ``dpi`` sets their
+        resolution.
+
+        ``oligos/`` holds the same sequences one file per member, annotated GenBank by
+        default (``oligo_fmt="fasta"`` or ``"both"`` for the other forms). Pass
+        ``oligos=False`` to skip it when a library of thousands would make that directory
+        unwieldy.
 
         With a starting vector set, the cloning outputs come too: ``destination_vector.csv``
         and an annotated ``vector/`` map for the plasmid to build, and ``assembled_vectors/``
@@ -689,16 +751,17 @@ class Library:
         Files go in a dated run directory under ``output_dir``
         (``out/<name>_20260724_143210``), so a second run cannot overwrite the first and
         every file says which run produced it. The stamp is the moment the sequences were
-        built, so re-exporting one library refreshes its directory instead of littering.
+        built, so re-exporting one library refreshes its directory instead of making a new one.
         Pass ``timestamp=False`` to write straight into ``output_dir``, e.g. when a build
         script wants a fixed path. The directory used is left on ``self.output_dir``.
 
         Refuses to write anything if a variant failed optimization, since an order should
         not go out incomplete; inspect ``lib.failed`` or call ``drop_failed()``. An untiled
         library also needs a synthesis method, from ``method=`` or ``spec.platform``. Both
-        are checked before the directory is created, so a library that is not ready leaves
-        no litter."""
-        # Fail before making a directory, so a library that isn't ready leaves no litter.
+        are checked before the directory is created, so a library that is not ready creates
+        nothing."""
+        # Checked before the directory is made, so nothing is created for a library that
+        # is not ready.
         _io._require_complete(self)
         tiled = self.tiles is not None
         if not tiled and method is None and self.spec.platform is None:
@@ -719,6 +782,8 @@ class Library:
         else:
             self.to_usortm(out / "variants.csv")
         self.to_vendor(out / f"{name}_order.csv", method=method)
+        if oligos:
+            self.to_oligo_files(out / "oligos", fmt=oligo_fmt)
         self.to_design_specs(out / _specs_filename(name))
         if vectors and tiled and self.spec.resolve_vector(self.tiled_params) is not None:
             self.to_vectors(out / "destination_vectors.csv")
@@ -727,15 +792,22 @@ class Library:
             self.to_vectors(out / "destination_vector.csv")
             self.to_vector_maps(out / "vector")
             self.to_assembled_vectors(out / "assembled_vectors")
-        # The codon-usage plot needs one shared reference to plot against, which a sequence
-        # set has not got, so skip it there rather than warn about it on every export.
-        if plots and self.kind != "sequence_set":
-            try:
-                self.to_qc_plots(out / f"{name}_codon_usage.png")
-            except Exception as exc:
-                import warnings
-                warnings.warn(
-                    f"Skipping QC plot ({exc}).",
-                    RuntimeWarning, stacklevel=2,
-                )
+        if plots:
+            from .viz import DEFAULT_DPI, codon_matrix_figure, codon_usage_figure
+
+            # The codon-usage plot needs one shared reference to plot against, which a sequence
+            # set has not got, so skip it there rather than warn about it on every export. The
+            # codon map counts across members, so it works either way.
+            wanted = [("codon_matrix", codon_matrix_figure)]
+            if self.kind != "sequence_set":
+                wanted.insert(0, ("codon_usage", codon_usage_figure))
+            for label, build in wanted:
+                try:
+                    self._save_figure(build(self, dpi=dpi or DEFAULT_DPI),
+                                      out / f"{name}_{label}.png")
+                except Exception as exc:
+                    import warnings
+                    warnings.warn(
+                        f"Skipping the {label} plot ({exc}).", RuntimeWarning, stacklevel=2,
+                    )
         return self

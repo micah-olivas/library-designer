@@ -12,6 +12,7 @@ import pandas as pd
 
 from .checks import CheckReport, check_library
 from .regions import assemble
+from .checks.report import rows_to_lines
 from .spec import optimization_line
 
 
@@ -62,7 +63,7 @@ class LibrarySummary:
         """True when nothing failed optimization and QC passed.
 
         False before ``codon_optimize()``, since ``qc`` is None and there is no report to
-        pass. The ``n_failed`` clause is belt and braces on top of ``qc.passed``, because a
+        pass. The ``n_failed`` clause is redundant with ``qc.passed``, because a
         member whose optimization failed is also listed in ``qc.optimization_failed``.
         """
         return self.n_failed == 0 and self.qc is not None and self.qc.passed
@@ -76,10 +77,10 @@ class LibrarySummary:
             state = "all optimized"
         return f"Library '{self.name}': {self.n_variants} variants, {state}"
 
-    def _size_line(self) -> str | None:
-        """How long the thing you order is: the oligo for a tiled library, the construct
-        with its adaptors for everything else. None before optimization, when neither is
-        known."""
+    def _size_row(self) -> tuple[str, str] | None:
+        """How long the thing you order is, as ``(label, value)``: the oligo for a tiled
+        library, the construct with its adaptors for everything else. None before
+        optimization, when neither is known."""
         a = self.adaptors
         if self.tiles:
             t = self.tiles
@@ -87,35 +88,35 @@ class LibrarySummary:
             if t.get("oligo_len_min"):
                 bits.append(f"oligos {_bp(t['oligo_len_min'], t['oligo_len_max'])}")
             bits.append(f"primer set {t['primer_set']}")
-            return "  tiles: " + ", ".join(bits)
+            return "tiles", "   ".join(bits)
         length = (
             _bp(a["construct_len_min"], a["construct_len_max"])
             if "construct_len_min" in a
             else None
         )
         if not a["len_5"] and not a["len_3"]:            # nothing to say about adaptors
-            return f"  construct: {length}" if length else None
+            return ("construct", length) if length else None
         pair = (
-            f"  adaptors: 5' {_short(a['5_prime'])} ({a['len_5']} bp), "
+            f"5' {_short(a['5_prime'])} ({a['len_5']} bp)   "
             f"3' {_short(a['3_prime'])} ({a['len_3']} bp)"
         )
-        return f"{pair}, construct {length}" if length else pair
+        return "adaptors", f"{pair}   construct {length}" if length else pair
 
     def __str__(self) -> str:
-        lines = [self._head()]
+        rows: list[tuple[str, str]] = []
         if self.platform:
-            lines.append(f"  platform: {self.platform}")
+            rows.append(("platform", self.platform))
         # A sequence set's one bucket just repeats the variant count, so skip it there.
         if list(self.per_sublibrary) != ["members"]:
-            lines.append(
-                "  sublibraries: "
-                + ", ".join(f"{k}={v}" for k, v in self.per_sublibrary.items())
-            )
-        if (size := self._size_line()) is not None:
-            lines.append(size)
+            rows.append(("sublibraries",
+                         "  ".join(f"{k}={v}" for k, v in self.per_sublibrary.items())))
+        if (size := self._size_row()) is not None:
+            rows.append(size)
         if self.starting_vector:
-            lines.append(f"  starting vector: {Path(self.starting_vector).name}")
-        lines.append("  optimization: " + optimization_line(self.optimization))
+            rows.append(("vector", Path(self.starting_vector).name))
+        rows.append(("optimization", optimization_line(self.optimization)))
+
+        lines = [self._head()] + rows_to_lines(rows)
         if self.qc is not None:
             lines.append("  " + self.qc.text(count=False).replace("\n", "\n  "))
         return "\n".join(lines)

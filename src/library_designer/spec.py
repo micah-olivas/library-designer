@@ -1,5 +1,5 @@
-"""The design, as data. A ``LibrarySpec`` plus a generator fully determines a
-library, so the spec doubles as the design-specs record and can be loaded from TOML.
+"""A ``LibrarySpec`` plus a generator fully determines a library, so the spec doubles
+as the design-specs record and can be loaded from TOML.
 """
 from __future__ import annotations
 
@@ -31,6 +31,15 @@ class CodonOptimizationParams:
     gc_max: float | None = None      # fraction, e.g. 0.68 (IDT eBlock GC ceiling)
     gc_window: int | None = None     # windowed GC in bp; None = whole sequence
     max_random_iters: int = 100_000
+    # What to do when the preferred codon for a mutated residue would introduce a
+    # restricted motif. True steps down that residue's usage ranking to the next codon
+    # that avoids it, so the variant is still makeable at a rarer codon. False tries the
+    # preferred codon only and records the variant as a failure, so no rarer codon is
+    # substituted without you asking for it. A pinned literal codon (an amber TAG) has no
+    # synonymous alternative, so either way it goes in verbatim and is flagged if it
+    # introduces a motif. Scan libraries only. A SequenceSet has no single mutated
+    # position, so DNA Chisel resolves the whole CDS instead.
+    synonymous_fallback: bool = True
 
 
 def optimization_line(params: dict) -> str:
@@ -40,6 +49,8 @@ def optimization_line(params: dict) -> str:
     read back from a design-specs record) so both ``LibrarySpec`` and ``LibrarySummary``
     print them the same way. An unset GC bound is left out, and so is the iteration cap
     under ``use_best_codon``, which picks each codon outright rather than searching.
+    ``synonymous_fallback`` appears only when it is off, since that changes which variants
+    are makeable and belongs in the record.
     """
     bits = [str(params.get("species")), str(params.get("method"))]
     gc_min, gc_max = params.get("gc_min"), params.get("gc_max")
@@ -54,6 +65,9 @@ def optimization_line(params: dict) -> str:
         bits.append(gc)
     if params.get("method") != "use_best_codon" and params.get("max_random_iters"):
         bits.append(f"{params['max_random_iters']} iters")
+    # Absent from an older record, where the fallback was unconditional, so default to on.
+    if not params.get("synonymous_fallback", True):
+        bits.append("no synonymous fallback")
     return ", ".join(bits)
 
 
@@ -91,7 +105,7 @@ def _clean_sequence(value, field_name: str, alphabet: frozenset[str], what: str)
     sequence used to survive all the way to a bogus variant name. Anything outside the
     alphabet is refused here rather than later: DNA Chisel reverse-translates ``X``, ``B``,
     and ``Z`` to an arbitrary residue without complaining, so an unchecked ambiguity code
-    silently designs a library for a different protein."""
+    designs a library for a different protein."""
     seq = "".join(str(value).split()).upper()
     bad = sorted(set(seq) - alphabet)
     if bad:
@@ -145,7 +159,7 @@ class TiledAssemblyParams:
     # Move the tile boundaries, within the budget, to the positions whose fused overhangs
     # share the least homology. The overhangs are read off the CDS at the boundaries, so
     # where a boundary falls is the only handle on them (see layout/boundaries.py). Off by
-    # default, since it changes the windows and so the oligos a design emits.
+    # default, since it changes the windows and so the oligos a library emits.
     optimize_overhangs: bool = False
     # Even the pool out to one oligo length. Tiles differ in size, so the oligos do too, and
     # moving the boundaries for better overhangs widens the spread. The filler goes between
@@ -182,7 +196,7 @@ class LibrarySpec:
     Only ``name`` is required. A ``SubstitutionScan`` needs ``protein_sequence`` (or
     ``uniprot`` to fetch it) and ``substitutions``. A ``SequenceSet`` is handed its
     members separately and reads the spec for the adaptors and the optimization params.
-    The remaining fields shape the design or the order form, and each one carries its
+    The remaining fields shape the library or the order form, and each one carries its
     meaning in the comment on its line.
 
     Several fields are normalized on assignment, at construction and on later assignment
@@ -202,7 +216,7 @@ class LibrarySpec:
     protein_sequence: str = ""               # the single WT protein for a SubstitutionScan; unused by a SequenceSet
     # A UniProt accession to take the protein from instead of pasting it. Resolved once, on
     # construction, when protein_sequence is left empty; the sequence is then stored above so
-    # the spec is self-contained and the design does not depend on UniProt later. An explicit
+    # the spec is self-contained and the build does not depend on UniProt later. An explicit
     # protein_sequence wins and the accession is kept as provenance. See uniprot.py.
     uniprot: str | None = None
     uniprot_entry: dict | None = None        # filled in by the lookup: entry name, organism, SV
@@ -299,14 +313,32 @@ class LibrarySpec:
         object.__setattr__(self, name, value)
 
     @property
-    def truncated_sequence(self) -> str:
-        """The protein sequence after removing the N-terminal ``truncation`` residues."""
+    def designed_sequence(self) -> str:
+        """The protein the library encodes, which is ``protein_sequence`` with the first
+        ``truncation`` residues dropped. Most libraries leave ``truncation`` at 0, where
+        this is the whole protein. Read the name as "the protein being designed" rather
+        than "the truncated protein"."""
         if self.truncation and self.truncation >= len(self.protein_sequence):
             raise ValueError(
                 f"truncation ({self.truncation}) removes the whole {len(self.protein_sequence)} "
                 "aa protein_sequence, leaving nothing to design."
             )
         return self.protein_sequence[self.truncation:]
+
+    @property
+    def truncated_sequence(self) -> str:
+        """Alias for ``designed_sequence``, kept so existing scripts and notebooks still
+        run. The name misleads when ``truncation`` is 0, which is most libraries, so new
+        code should say ``designed_sequence``."""
+        return self.designed_sequence
+
+    def protein_description(self) -> str:
+        """How to name the designed protein in a message, e.g. "protein_sequence" or
+        "the truncated protein_sequence (truncation=6)". Truncation is mentioned only when
+        the spec truncates, so a spec that does not never reads as if it did."""
+        if not self.truncation:
+            return "protein_sequence"
+        return f"the truncated protein_sequence (truncation={self.truncation})"
 
     def resolve_vector(
         self, tiled: TiledAssemblyParams | None = None
@@ -405,7 +437,7 @@ class LibrarySpec:
 
     def __repr__(self) -> str:
         trunc = (
-            f"  (truncation {self.truncation}, {len(self.truncated_sequence)} aa scanned)"
+            f"  (truncation {self.truncation}, {len(self.designed_sequence)} aa scanned)"
             if self.truncation
             else ""
         )
@@ -424,7 +456,7 @@ class LibrarySpec:
     def _repr_html_(self) -> str:
         trunc = (
             f" <span style='opacity:.6'>(truncation {self.truncation}, "
-            f"{len(self.truncated_sequence)} aa scanned)</span>"
+            f"{len(self.designed_sequence)} aa scanned)</span>"
             if self.truncation
             else ""
         )

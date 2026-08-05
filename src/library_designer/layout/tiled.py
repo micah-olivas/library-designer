@@ -512,7 +512,7 @@ def tile_library(library, params: TiledAssemblyParams) -> dict:
     from .boundaries import windows_cost
 
     tiles_coords = tile_windows(reference, params)
-    # Both scores, so the design record says what the boundaries cost and what they would
+    # Both scores, so the run record says what the boundaries cost and what they would
     # have cost on the balanced split, whether or not the search ran.
     balanced = compute_tiles(len(reference), params)
     overhang_cost = windows_cost(reference, params, tiles_coords)
@@ -577,7 +577,7 @@ def tile_library(library, params: TiledAssemblyParams) -> dict:
 
     wt_controls = None
     if params.wt_controls:
-        wt_controls = wt_control_rows(df, reference, library.spec.truncated_sequence,
+        wt_controls = wt_control_rows(df, reference, library.spec.designed_sequence,
                                       tiles, params)
 
     return {

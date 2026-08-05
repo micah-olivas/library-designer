@@ -1,6 +1,5 @@
 """Reusable DNA Chisel constraint builders, one place to define sequence rules,
-so the optimizer doesn't keep two near-identical constraint lists the way the
-MBO-038 notebook did.
+so the optimizer does not keep two near-identical constraint lists.
 """
 from __future__ import annotations
 

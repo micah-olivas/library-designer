@@ -108,28 +108,68 @@ out = lib.run_dir("out")                                    # out/my_library_202
 lib.to_full_csv(out / "my_library_full.csv")                # master table with length and gc_content
 lib.to_usortm(out / "variants.csv")                         # name,sequence for a downstream pooling/QC plan
 lib.to_vendor(out / "order.csv")                            # order form, method taken from spec.platform
-lib.to_design_specs(out / "my_library_design_specs.json")   # design record: spec, params, seed, versions
+lib.to_design_specs(out / "my_library_design_specs.json")   # run record: spec, params, seed, versions
 
-lib.export_all("out")                                       # the same set, named for you, plus the QC plot
+lib.export_all("out")                                       # the same set, named for you, plus the QC plots
 ```
 
 Each run writes into its own dated directory, so a re-run cannot overwrite an order you
 already sent and any file found later can be traced back to the run that produced it. The
 stamp is the moment the sequences were built, so re-exporting one library refreshes its
-directory rather than littering; the same value is recorded as `created` in the design
+directory rather than making a new one; the same value is recorded as `created` in the design
 specs, and the path is left on `lib.output_dir`. Pass `export_all(..., timestamp=False)`
 to write straight into the directory you name, e.g. from a build script that wants a fixed
 path.
 
-By default, `codon_optimize()` optimizes the WT CDS once into a frozen reference (`lib.reference`), then stamps each variant's single codon onto it. This ensures that each library member matches the reference sequence except at its intended position. A variant whose codon can't avoid a forbidden motif is recorded in `lib.failed` and reported by QC instead of aborting the run.
+By default, `codon_optimize()` optimizes the WT CDS once into a frozen reference (`lib.reference`), then stamps each variant's single codon onto it. Each member then matches the reference except at its intended position. A variant whose codon can't avoid a forbidden motif is recorded in `lib.failed` and reported by QC instead of aborting the run.
+
+When the preferred codon for a mutated residue would spell a forbidden motif, the stamp steps down that residue's usage ranking and takes the next codon that avoids it, so the variant is still makeable at a rarer codon. Set `CodonOptimizationParams(synonymous_fallback=False)` to be told instead. The position then lands in `lib.failed` with the codon named, and no rarer codon is substituted. A pinned literal codon has no synonymous alternative, so it is placed verbatim and flagged either way.
 
 `lib.summary()` returns a `LibrarySummary` with variant counts per sublibrary, the codon-optimization parameters, the adaptor regions and construct length range, the synthesis platform, and the QC report. Printing it keeps only the lines that say something, so an empty adaptor pair, an unset GC bound, and a check that found nothing do not crowd out the ones that need reading. A tiled library shows its tiles and oligo lengths in place of a construct length, since the oligo is what you order.
 
+A single-mutant library is only interpretable if every
+member matches the WT outside its own codon, otherwise a phenotype cannot be
+pinned on the substitution. `rep.off_target_edits` names any member that strays, checked on
+the sequences themselves, so it runs whether or not there is a plasmid to clone into. `assembly_aligned` checks the same thing on the simulated clone, and needs a destination
+vector.
+
+`lib.check()` returns a `CheckReport` that shows the same readable block whether you print
+it or just echo it in a notebook. To act on the result in code, read `rep.passed` for the
+verdict, `rep.issues` for a dict of only the checks that found something, and
+`rep.advisories` for the informational notes that never fail a report. `rep.issues` is
+empty exactly when `rep.passed` is true, so `if rep.issues:` is the branch to write.
+
+```python
+rep = lib.check()
+if rep.issues:
+    for check, entries in rep.issues.items():
+        print(check, len(entries), entries[:3])   # e.g. enzyme_hits:BsaI 1 ['K4G']
+
+lib.check(fmt="text")     # the report as a plain string, for a log
+lib.check(fmt="dict")     # every field plus passed/issues/advisories, ready for JSON
+```
+
+`export_all` writes two QC figures. `<name>_codon_usage.png` plots host codon-usage
+frequency along the CDS, the WT as a line and each substitution's codon as a point.
+`<name>_codon_matrix.png` is the codon map: codons down the y axis grouped by amino acid,
+each group banded and ordered most- to least-used in the host, CDS position across the x
+axis, and each cell counting the members carrying that codon there. The frozen reference
+reads as a dark path and the stamped substitutions as pale marks off it, so a codon drawn
+low in its own band is one the design had to compromise on. `lib.plot_codon_matrix()`
+returns it for a notebook, with `reference_only=True` to plot the WT alone.
+
+Every plotting call takes `dpi`, and one number governs both the inline figure and the file
+written from it. The default is 200 rather than matplotlib's 100, because the codon map draws
+each cell a couple of pixels wide and a long CDS goes soft at the lower setting. Raise it for
+a figure headed into a manuscript: `lib.plot_codon_matrix(dpi=600)`,
+`lib.to_qc_plots(path, dpi=600)`, or `lib.export_all("out", dpi=600)` for both QC images at
+once.
+
 Substitutions accept amino acids, where the optimizer picks the codon, or literal codons (e.g. `"TAG"`), which are placed verbatim and protected. Codon-optimization parameters (species, method, GC window, iterations) live on `CodonOptimizationParams` and are recorded in `to_design_specs()`, so every order documents how it was generated.
 
-Codon optimization searches stochastically, so it is seeded on every run and the seed is
-recorded with the design. Re-running a spec rebuilds the same library, on any machine,
-and your own `numpy.random` state is left as it was. Change `spec.seed` for a different
+Codon optimization searches stochastically, so it is seeded on every run and the seed goes
+into the run record. Re-running a spec rebuilds the same library, and your own `numpy.random` state is left as
+it was. Change `spec.seed` for a different
 draw, or set it to `None` to follow the ambient RNG.
 
 ## Protein from UniProt
@@ -151,8 +191,8 @@ The lookup runs once, at construction, and only when `protein_sequence` is left 
 spec reaches the network exactly when you asked it to. The sequence is then stored on the
 spec, and the entry it came from (name, organism, gene, sequence version, when it was
 fetched) is recorded alongside it in `to_design_specs()`. That matters because UniProt
-entries are revised: the design record holds the residues that were actually used, so a
-design stays reproducible after the entry changes. The FASTA is cached under
+entries are revised: the record holds the residues that were actually used, so the library
+stays reproducible after the entry changes. The FASTA is cached under
 `~/.cache/library-designer/uniprot/`, so later runs work offline; `spec.resolve_uniprot(refresh=True)`
 fetches it again, and `LIBRARY_DESIGNER_CACHE` moves the cache.
 
@@ -164,7 +204,7 @@ become an HTTP call.
 ## Starting vector
 
 Point `starting_vector` at the plasmid you clone into (`.gb`, `.dna`, or `.fasta`) and the
-design is checked and exported against the real backbone:
+library is checked and exported against the real backbone:
 
 ```python
 spec = LibrarySpec(
@@ -207,8 +247,7 @@ plasmid you supplied.
 
 ### Overhang specificity
 
-A Golden Gate reaction is only directional if the two fused overhangs it works with tell
-each other apart. When they do not, the cut vector's own ends anneal and it re-closes empty,
+A Golden Gate reaction is only directional if its two fused overhangs are distinct. When they do not, the cut vector's own ends anneal and it re-closes empty,
 or the fragment goes in the other way round and you clone the tile backwards. QC counts how
 many of the four bases the two share, in both orientations, and checks each against its own
 reverse complement to catch a palindrome. Aim for at most one shared base. A full match
@@ -240,7 +279,7 @@ A tiled design does not pick its overhangs, so the boundary is the only handle o
 budget caps a tile and the balanced split sits under that cap, which leaves spare codons, and
 every one of them is a boundary that could move. `tiled.optimize_overhangs` searches those
 positions and keeps the layout whose overhangs share the least sequence. The balanced split
-is scored against every candidate and wins ties, so the search can only hold a design steady
+is scored against every candidate and wins ties, so the search can only hold a layout steady
 or improve it. It scores only what can misfire, a tile against itself, so the slack is not
 spent on cross-tile homology that never meets. On the bundled glucokinase example the
 balanced split leaves tile4 with two ends one mismatch from complementary, which would let
@@ -251,14 +290,14 @@ Boundaries that move make the tiles uneven, and the oligos with them. `tiled.pad
 evens the pool back out to one length with filler between each primer and the recognition
 site beside it. That position is what makes it safe: the pad is outside both sites, so it is
 amplified with the oligo and cut away before anything ligates, and the fragment that reaches
-the vector is byte-identical to the unpadded one. `pad_target` sets the length outright,
+the vector is unchanged. `pad_target` sets the length outright,
 otherwise the pool levels up to the longest oligo the layout already needed.
 
 ```python
 tiled = TiledAssemblyParams(oligo_budget=300, optimize_overhangs=True, pad_oligos=True)
 ```
 
-Both default to off, so an existing design keeps the boundaries and the oligos it had.
+Both default to off, so an existing library keeps the boundaries and the oligos it had.
 Turning the search on rewrites every oligo, so re-order the pool rather than mixing layouts.
 `lib.design_specs["tiled"]` records which layout was used and what the overhangs cost either
 way.
@@ -289,7 +328,7 @@ this one.
 `AssemblyResult` per destination vector. `result.product` is the assembled plasmid, the clone
 you expect to sequence.
 
-The clones themselves come out with the rest of the design:
+The clones themselves come out with everything else `export_all` writes:
 
 ```python
 lib.export_all("out")           # -> out/<name>_<date>_<time>/assembled_vectors/
@@ -337,7 +376,7 @@ lib.to_vectors(out / "vectors.csv")              # per-tile Golden Gate destinat
 
 The WT reference is either codon-optimized (the default) or a native CDS supplied with `cds=`. Designed sequences are screened for enzyme sites to ensure orthogonality. Orthogonal primers come from a validated set ([Subramanian et al. 2018](https://doi.org/10.1093/synbio/ysx008)) by default, or may be provided with `tiled.primer_set=<path>`.
 
-Each tile also gets its own WT member, `WT_Tile_0` and so on, which is that tile's window taken straight from the reference and flanked by the same primers as its mutants. Since a sublibrary is amplified and assembled on its own, this is the unmutated clone you sequence and normalize that tile against. These rows are in the pooled order alongside the mutants. The single `WT` row remains in `lib.df` as the design record and carries no oligo of its own. Set `tiled.wt_controls = false` to order only the mutants.
+Each tile also gets its own WT member, `WT_Tile_0` and so on, which is that tile's window taken straight from the reference and flanked by the same primers as its mutants. Since a sublibrary is amplified and assembled on its own, this is the unmutated clone you sequence and normalize that tile against. These rows are in the pooled order alongside the mutants. The single `WT` row remains in `lib.df` for the record and carries no oligo of its own. Set `tiled.wt_controls = false` to order only the mutants.
 
 A tiled library needs one destination vector per tile, each carrying the rest of the WT CDS. Name the starting plasmid as above with `starting_vector`, or in the `[tiled]` block with `tiled.starting_vector` when the layout has its own backbone. The parent vector is screened for stray Golden Gate assembly sites to prevent off-target cleavage. Set `use_vector_cds=true` to freeze the CDS already in the plasmid and clone the vectors straight from it, which flags undesirable motifs in the CDS instead of recoding them.
 
@@ -390,13 +429,23 @@ The same library serializes several ways.
 | `to_vectors` | cloning | the destination vector to build (one row per tile if tiled) |
 | `to_vector_maps` | cloning | annotated GenBank of that vector (needs a starting vector) |
 | `to_assembled_vectors` | sequence verification | the clone every variant assembles into: one annotated GenBank each, a combined FASTA, the parent, and a manifest (standard libraries only) |
+| `to_oligo_files` | plasmid editors, aligners | one file per ordered oligo, annotated GenBank (or FASTA) |
 
-`export_all` always writes `to_full_csv`, `to_vendor`, and `to_design_specs`. A standard
-library also gets `to_usortm`; a tiled one gets `to_oligo_pool` and `to_primer_order` in
-its place, because a tiled pool has no single variable region to write. With a starting
-vector set the cloning outputs come too: `to_vectors` and `to_vector_maps` for either
-kind, and `to_assembled_vectors` for a standard library. Pass `vectors=False` to leave the
-cloning outputs out.
+`export_all` always writes `to_full_csv`, `to_vendor`, `to_design_specs`, and
+`to_oligo_files`. A standard library also gets `to_usortm`; a tiled one gets
+`to_oligo_pool` and `to_primer_order` in its place, because a tiled pool has no single
+variable region to write. With a starting vector set the cloning outputs come too:
+`to_vectors` and `to_vector_maps` for either kind, and `to_assembled_vectors` for a
+standard library. Pass `vectors=False` to leave the cloning outputs out, or
+`oligos=False` to skip the per-oligo directory.
+
+The per-oligo files land in `oligos/`, one per member. They are annotated GenBank by
+default, marking the coding stretch the oligo carries, the mutated codon, and every Type
+IIS site on either strand, so an oligo opens in a plasmid editor already labelled. Pass
+`oligo_fmt="fasta"` for sequence only, or `"both"`. A tiled library writes its assembled
+oligo with the primers and enzyme sites on it; anything else writes the whole construct,
+adaptors included. An amber `K7*` becomes `K7stop.gb`, since `*` globs in a shell, while
+the record inside keeps the real name.
 
 ### The uSort-M handoff
 
@@ -421,8 +470,8 @@ record rather than as extra columns:
 moment the sequences were built, so it is stable across re-exports of one library, distinct
 for the next run, and still meaningful once a file has been copied somewhere else. A
 downstream tool that echoes it into its own outputs gives you one string to trace a plate,
-a pool, or a sequencing result back to the design that produced it, and
-`LibrarySpec.from_toml` plus the recorded seed rebuilds that design exactly.
+a pool, or a sequencing result back to the run that produced it, and
+`LibrarySpec.from_toml` plus the recorded seed rebuilds that run exactly.
 
 The `sha256` is of `variants.csv` as written. Checking it before reading tells a consumer
 whether the CSV in front of it is the one the record describes, which is what catches a

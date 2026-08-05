@@ -33,8 +33,8 @@ def _classify(entry: str) -> tuple[str, str]:
 
 
 class SubstitutionScan:
-    """Introduce each requested residue/codon at every position of the (optionally
-    truncated) protein.
+    """Introduce each requested residue/codon at every position of the designed protein
+    (``spec.designed_sequence``, the whole protein unless ``truncation`` is set).
 
     - Positions where the substitution matches the wild-type residue are skipped.
     - A codon substitution is placed verbatim and protected during optimization;
@@ -62,7 +62,7 @@ class SubstitutionScan:
         until ``codon_optimize()`` runs.
         """
         spec = self.spec
-        seq = spec.truncated_sequence
+        seq = spec.designed_sequence
         subs = [_classify(s) for s in spec.substitutions]
         a5, a3 = spec.adaptor_5.upper(), spec.adaptor_3.upper()  # explicit region columns
         rows: list[dict] = []
@@ -82,7 +82,7 @@ class SubstitutionScan:
                         "wt_residue": wt,
                         "mut_residue": symbol,
                         "codon": codon or pd.NA,   # literal codon to protect, if any
-                        "mut_index": i,            # 0-based index in the truncated protein
+                        "mut_index": i,            # 0-based index in the designed protein
                         "adaptor_5": a5,
                         "adaptor_3": a3,
                     }

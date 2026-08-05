@@ -1,4 +1,4 @@
-"""QC. ``check_library`` runs everything the design supports and returns a ``CheckReport``.
+"""QC. ``check_library`` runs every check that applies to a library and returns a ``CheckReport``.
 
 The per-topic checks live in the sibling modules (``motifs``, ``translation``, ``tiled``,
 ``vector``, ``assembly``) and are called from ``report`` rather than by hand.
