@@ -103,11 +103,20 @@ def build_reference(spec: LibrarySpec, seed: int | None = None) -> str:
         raise ValueError(f"{source} length ({len(cds)}) is not a multiple of 3.")
     protein = spec.designed_sequence
     got = translate(cds)
+    if got != protein and spec.truncation and got == spec.protein_sequence:
+        # A full-length CDS alongside a truncation. Trimming it is the only reading that makes
+        # sense: the truncation is stated once and applies to the protein and the DNA that
+        # encodes it, so asking for a pre-trimmed CDS would just be asking the caller to do
+        # this by hand. Codons come off the same end the residues did.
+        drop = spec.truncation * 3
+        cds = cds[drop:] if spec.terminus == "N" else cds[:-drop]
+        got = translate(cds)
     if got != protein:
         raise ValueError(
             f"{source} does not translate to {spec.protein_description()}: "
             f"{sum(a != b for a, b in zip(got, protein))} residue(s) differ "
-            f"(it encodes {len(got)} aa, protein is {len(protein)} aa)."
+            f"(it encodes {len(got)} aa, protein is {len(protein)} aa). Give either the "
+            "designed region or the full-length CDS, which is trimmed to match."
         )
     if not from_vector:
         # spec.cds path only: a chosen native CDS with an internal Golden Gate site is

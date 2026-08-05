@@ -491,7 +491,8 @@ def to_vector_maps(library, directory: str | Path) -> None:
     ``destination.gb``. Both come with a ``destination_vectors.csv`` manifest. Each map
     carries the two BsaI sites, the drop-out, the two fused overhangs, the retained 5'/3'
     CDS arms, and any backbone features from the starting vector that do not overlap the
-    insert.
+    insert. With a truncation set, the codons held out of the library get a ``CDS`` feature
+    too, since the plasmid is what supplies those residues.
 
     Two kinds of backbone feature are dropped. One overlapping the located insert goes,
     since the insert replaces what it annotated, and so does one straddling the origin
@@ -551,6 +552,21 @@ def to_vector_maps(library, directory: str | Path) -> None:
             if a < b_mod:                                 # skip anything that would wrap the origin
                 feats.append(SeqFeature(SimpleLocation(a, b_mod, strand=strand),
                                         type=ftype, qualifiers={"label": [label]}))
+
+        # Codons held back by a truncation stay in the plasmid and supply those residues, so
+        # mark them: opening the map should show what the vector contributes and what the oligo
+        # does. Adaptor padding eats into the same stretch from the locus side, so annotate
+        # only the part the vector still holds.
+        spec = library.spec
+        drop = spec.truncation * 3
+        if drop:
+            held = drop - (dest.pad_5 if spec.terminus == "N" else dest.pad_3)
+            label = (f"{spec.truncation} aa held out of the library, supplied by the vector "
+                     f"({spec.terminus} terminus)")
+            if held > 0 and spec.terminus == "N":
+                add(offset - held, offset, "CDS", label)
+            elif held > 0:
+                add(offset + region_len, offset + region_len + held, "CDS", label)
 
         if s > 0:
             add(offset, cds5, "misc_feature", "CDS (5' arm, retained)")
@@ -683,8 +699,22 @@ def to_assembled_vectors(library, directory: str | Path, fmt: str = "both") -> N
         downstream = locus_len + (p - dest.end)
         return (locus_at + downstream) % n if dest.topology == "circular" else dest.start + downstream
 
-    shared: list = [SeqFeature(SimpleLocation(cds_at, cds_at + len(reference), strand=1),
-                               type="CDS", qualifiers={"label": [spec.name], "codon_start": ["1"]})]
+    # A truncation holds codons back for the plasmid to supply, so the clone's coding sequence
+    # is longer than the reference by that much and the feature has to cover both. Annotating
+    # the reference alone would leave the held-out residues outside the CDS on every map.
+    held = spec.truncation * 3
+    cds_from = cds_at - held if (held and spec.terminus == "N") else cds_at
+    shared: list = [SeqFeature(SimpleLocation(cds_from, cds_from + len(reference) + held,
+                                              strand=1),
+                               type="CDS", qualifiers={"label": [spec.name],
+                                                       "codon_start": ["1"]})]
+    if held:
+        lo = cds_from if spec.terminus == "N" else cds_at + len(reference)
+        shared.append(SeqFeature(
+            SimpleLocation(lo, lo + held, strand=1), type="misc_feature",
+            qualifiers={"label": [f"{spec.truncation} aa from the vector, held out of the "
+                                  f"library ({spec.terminus} terminus)"]},
+        ))
     for f in dest.features:
         if f.end <= f.start or not (f.end <= dest.start or f.start >= dest.end):
             continue                                     # overlaps the insert, the CDS covers it

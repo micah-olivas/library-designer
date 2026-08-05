@@ -15,7 +15,9 @@ tile's sublibrary can be selectively amplified out of the shared pool.
 Two site copies are the *only* recognition sites allowed in the oligo. Because adding
 the flanking primers/sites/spacers can create an unintended site spanning a junction,
 assembly is screened on the *fully assembled* oligo, and pooled primers that would form
-a junction site are skipped during assignment.
+a junction site are skipped during assignment. With ``tiled.screen_primers`` set, so are
+primers whose 3' end would anneal to the CDS, to the backbone, or to a primer already drawn
+(see ``checks/mispriming.py``).
 
 ``pad5`` / ``pad3`` are empty unless ``tiled.pad_oligos`` is set. Tiles differ in size, so
 without them the pool holds oligos of several lengths, and moving the boundaries for better
@@ -398,9 +400,22 @@ def _end3_ok(rev: str, ctx3: str, params: TiledAssemblyParams, pad_3: str = "") 
     return nf == 0 and nr == 1
 
 
+def primes_elsewhere(primer: str, targets: list[str]) -> bool:
+    """True if ``primer``'s 3' end could anneal anywhere in ``targets``, either strand.
+
+    The screen behind ``tiled.screen_primers``. Scored on the same terms QC reports with, the
+    same function and the same mismatch budget (``checks/mispriming``), so a primer the screen
+    passes is not then reported by ``check()``. A primer shorter than the reporting threshold is
+    screened on pairing in full, which is the only duplex it has."""
+    from ..checks.mispriming import MIN_ANNEAL, MISMATCH_BUDGET, tolerant_sites
+
+    least = min(MIN_ANNEAL, len(primer))
+    return any(tolerant_sites(primer, t, least, MISMATCH_BUDGET) for t in targets if t)
+
+
 def _assign_primers(tiles: list[tuple[int, int]], reference: str, primer_set: PrimerSet,
-                    params: TiledAssemblyParams,
-                    target: int | None = None) -> list[tuple[str, str, str, str, str, str]]:
+                    params: TiledAssemblyParams, target: int | None = None,
+                    screen: list[str] | None = None) -> list[tuple[str, str, str, str, str, str]]:
     """Choose (fwd_id, fwd, rev_id, rev, pad_5, pad_3) per tile. A pool is drawn
     primer-by-primer, skipping any that would form a junction site; a paired set is used as
     given.
@@ -408,7 +423,12 @@ def _assign_primers(tiles: list[tuple[int, int]], reference: str, primer_set: Pr
     The 5' and 3' junctions are independent (each involves only its own primer, pad, site,
     spacer, and overhang), so the two ends are validated separately. A pad's length is fixed
     by the tile before any primer is picked, but its bases sit against the primer, so the pad
-    is built per candidate and the junction judged with it in place."""
+    is built per candidate and the junction judged with it in place.
+
+    ``screen`` is the sequences a drawn primer must not prime in, the reference CDS and the
+    destination-vector backbone, passed when ``tiled.screen_primers`` is set. Each primer
+    already drawn is added to it as it is drawn, so the primers of one pool cannot prime on
+    each other's oligos."""
     n = len(tiles)
     if primer_set.capacity < n:
         raise ValueError(
@@ -429,17 +449,27 @@ def _assign_primers(tiles: list[tuple[int, int]], reference: str, primer_set: Pr
 
     pool = list(primer_set.primers)
     cursor = 0
+    # The screen grows as primers are drawn, so each new one is checked against the ones already
+    # on the oligos as well as against the reference and the backbone.
+    avoid = list(screen or [])
 
     def draw(ok) -> tuple[str, str]:
         nonlocal cursor
         while cursor < len(pool):
             pid, seq = pool[cursor]
             cursor += 1
-            if ok(seq):
-                return pid, seq
+            if not ok(seq):
+                continue
+            if screen is not None and primes_elsewhere(seq, avoid):
+                continue
+            if screen is not None:
+                avoid.append(seq)
+            return pid, seq
         raise ValueError(
             f"Ran out of usable primers in {primer_set.name!r} while avoiding junction "
-            "sites; provide a larger primer set (tiled.primer_set=<path>)."
+            "sites"
+            + (" and off-target priming sites" if screen is not None else "")
+            + "; provide a larger primer set (tiled.primer_set=<path>)."
         )
 
     out = []
@@ -525,7 +555,15 @@ def tile_library(library, params: TiledAssemblyParams) -> dict:
     # One length for the whole pool, when asked for. Fixed before the primers are drawn,
     # since a pad's length follows from the tile and only its bases follow from the primer.
     target = pad_target(tiles_coords, params)
-    assignments = _assign_primers(tiles_coords, reference, primer_set, params, target)
+    # With screening on, a drawn primer must not prime on the CDS every oligo carries, nor on
+    # the backbone the sublibraries are cloned into. None means the screen is off, which is
+    # different from an empty list (screening against nothing).
+    screen = None
+    if params.screen_primers:
+        from .vector_io import backbone
+
+        screen = [reference] + (backbone(dest) if dest is not None else [])
+    assignments = _assign_primers(tiles_coords, reference, primer_set, params, target, screen)
 
     topology = dest.topology if dest is not None else "linear"
     tiles = []

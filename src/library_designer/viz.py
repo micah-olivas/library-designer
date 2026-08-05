@@ -16,6 +16,40 @@ from __future__ import annotations
 # dense figure like the codon map, where a cell is a couple of pixels wide.
 DEFAULT_DPI = 200
 
+# Every figure is typeset in one sans face, with fallbacks so a machine missing the first
+# choice still renders rather than warning per text object. Applied per figure by _apply_font
+# rather than through rcParams, which would change the font in the caller's own plots too.
+#
+# Arial leads and Helvetica follows, though the two are metrically the same and either is what
+# was asked for. macOS ships Helvetica as a .ttc collection whose bold face FreeType fails to
+# rasterize intermittently ("FT_Load_Glyph ... division by zero"), which took out the codon
+# map, the one figure here that sets bold text. Arial ships as a plain .ttf and does not.
+FONT_STACK = ["Arial", "Helvetica", "Helvetica Neue", "DejaVu Sans"]
+
+
+def _codon_axis(spec, n_codons: int) -> tuple[int, str]:
+    """``(first position, x-axis label)`` for a plot along the CDS.
+
+    Positions are full-protein numbering, the same as a variant's name and its ``position``
+    column, so an N-terminal truncation starts the axis at the first designed residue rather
+    than at 1. Otherwise a plot of a truncated library would disagree with every label the
+    rest of the package prints."""
+    first = spec.numbering_offset + 1
+    if first == 1:
+        return first, "Codon position (CDS)"
+    return first, f"Codon position (full protein, designed region starts at {first})"
+
+
+def _apply_font(fig):
+    """Typeset every text object on ``fig`` in ``FONT_STACK``, tick labels and colourbar
+    included, so nothing is left in matplotlib's default face."""
+    from matplotlib.text import Text
+
+    for label in fig.findobj(Text):
+        label.set_fontfamily(FONT_STACK)
+    return fig
+
+
 # Okabe-Ito colourblind-safe categorical palette (for sublibraries).
 _PALETTE = ["#E69F00", "#56B4E9", "#009E73", "#CC79A7", "#0072B2", "#D55E00", "#F0E442", "#999999"]
 
@@ -90,32 +124,37 @@ def codon_usage_figure(library, metric: str = "frequency", low_usage: float = 0.
 
     fig = _new_figure(figsize=(12.5, 4), dpi=dpi)
     ax = fig.subplots()
-    ax.plot(range(1, n_codons + 1), ref_y, color="0.45", lw=1.5, zorder=3, label="WT CDS")
+    first, xlabel = _codon_axis(spec, n_codons)
+    ax.plot(range(first, first + n_codons), ref_y, color="0.45", lw=1.5, zorder=3,
+            label="WT CDS")
 
     df = library.df
     muts = df[df["mut_index"].notna() & df["variable_dna"].notna()]
     subs = sorted(muts["mut_residue"].astype(str).unique())
     colours = {s: _PALETTE[i % len(_PALETTE)] for i, s in enumerate(subs)}
     for sub, grp in muts.groupby(muts["mut_residue"].astype(str)):
-        xs = grp["mut_index"].astype(int) + 1
+        xs = grp["mut_index"].astype(int) + first
         ys = [table.get(v[int(i) * 3:int(i) * 3 + 3], 0.0)
               for v, i in zip(grp["variable_dna"], grp["mut_index"])]
         ax.scatter(xs, ys, s=16, alpha=0.65, color=colours[sub], edgecolors="none",
                    zorder=2, label=f"to {sub}")
 
     if compare:
-        from .compare import _clean_dna
-        other = _clean_dna(compare)
+        from .compare import _clean_dna, trim_to_designed
+
+        # Trimmed by the same rule the comparison uses, so a full-length paste overlays in
+        # frame on a truncated reference instead of being shifted by the truncation.
+        other, _trimmed = trim_to_designed(spec, _clean_dna(compare))
         m = min(len(other) // 3, n_codons)
         other_y = [table.get(other[i * 3:i * 3 + 3], 0.0) for i in range(m)]
-        ax.plot(range(1, m + 1), other_y, color="#111111", lw=1.3, ls="--",
+        ax.plot(range(first, first + m), other_y, color="#111111", lw=1.3, ls="--",
                 alpha=0.9, zorder=4, label=compare_label)
 
     if guide:
         ax.axhline(guide, ls="--", lw=1, color="0.8", zorder=1)
     ax.set_ylim(-0.02, 1.05)
-    ax.set_xlim(0, n_codons + 1)
-    ax.set_xlabel("Codon position (CDS)")
+    ax.set_xlim(first - 1, first + n_codons)
+    ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.set_title(f"Codon-usage QC, {spec.name}  ({spec.optimization.species})", loc="left")
     # Legend outside the axes on the right, one entry per row. Inside the plot it covered
@@ -124,7 +163,7 @@ def codon_usage_figure(library, metric: str = "frequency", low_usage: float = 0.
     ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), ncol=1, fontsize=8,
               frameon=False, borderaxespad=0)
     fig.tight_layout(rect=(0, 0, 0.86, 1))
-    return fig
+    return _apply_font(fig)
 
 
 def tiling_figure(library, dpi: int = DEFAULT_DPI):
@@ -173,7 +212,7 @@ def tiling_figure(library, dpi: int = DEFAULT_DPI):
     ax.set_xlim(0, len(ref))
     ax.set_xlabel("CDS position (nt)")
     ax.set_ylabel("tile (fwd / rev primer)")
-    return fig
+    return _apply_font(fig)
 
 
 # Risk tiers from checks/overhangs.py, palest to loudest.
@@ -282,7 +321,7 @@ def overhang_figure(library, dpi: int = DEFAULT_DPI):
         handles=handles,
         loc="lower center", bbox_to_anchor=(0.5, 0.005), ncol=3, frameon=False, fontsize=7.5,
     )
-    return fig
+    return _apply_font(fig)
 
 
 def _rect(x, y, w, h, **kwargs):
@@ -306,12 +345,12 @@ def _codon_rows(species: str, symbols: set[str]) -> list[tuple[str, str]]:
 
 
 def codon_matrix_figure(library, log: bool = True, reference_only: bool = False,
-                        dpi: int = DEFAULT_DPI):
+                        wt_track: bool = True, dpi: int = DEFAULT_DPI):
     """Return a matplotlib Figure of which codon sits at every position of the CDS.
 
-    Codons run down the y axis grouped by the amino acid they encode, each group in a shaded
-    band and ordered most- to least-used in the host, so a codon drawn low in its own band is
-    one the design had to compromise on. Codon position along the CDS runs across the x axis.
+    Codons run down the y axis grouped by the amino acid they encode, divided by a rule and
+    labelled with one letter in the margin, and ordered most- to least-used in the host, so a
+    codon drawn low in its own group is one the design had to compromise on. Codon position along the CDS runs across the x axis.
     A cell counts how many library members carry that codon at that position, so the frozen
     reference reads as a continuous path and each stamped substitution shows up as a mark off
     it. ``reference_only=True`` counts the reference alone, which reduces the plot to that
@@ -321,10 +360,16 @@ def codon_matrix_figure(library, log: bool = True, reference_only: bool = False,
     magnitude above a substitution carried by one. ``log=True`` (the default) scales the
     colour logarithmically so both are visible at once; pass ``log=False`` for a linear scale,
     which suits a ``SequenceSet`` whose members are independent and spread more evenly.
+
+    ``wt_track`` writes the wild-type residue above each position, so a column can be read
+    against what the wild type has there. It is dropped when the positions are too narrow to
+    letter, which a long CDS will be, and when there is no shared reference to take the
+    residues from.
     """
-    from matplotlib.colors import LinearSegmentedColormap, LogNorm
-    from matplotlib.patches import Rectangle
     import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap, LogNorm
+    from matplotlib.patches import Patch
+    from matplotlib.ticker import FuncFormatter, NullFormatter
 
     if library.reference is None and reference_only:
         raise ValueError(
@@ -360,49 +405,103 @@ def codon_matrix_figure(library, log: bool = True, reference_only: bool = False,
             if r is not None:
                 counts[r][j] += 1
 
-    height = max(3.0, 0.16 * len(rows) + 1.4)
-    width = max(7.0, min(22.0, 0.055 * n_codons + 3.2))
-    fig = _new_figure(figsize=(width, height), dpi=dpi)
+    # Amino-acid groups, as [first row, last row + 1) spans.
+    groups: list[tuple[str, int, int]] = []
+    for i, (aa, _codon) in enumerate(rows):
+        if groups and groups[-1][0] == aa:
+            groups[-1] = (aa, groups[-1][1], i + 1)
+        else:
+            groups.append((aa, i, i + 1))
+
+    height = max(3.2, 0.16 * len(rows) + 1.8)
+    width = max(7.0, min(22.0, 0.055 * n_codons + 3.8))
+    fig = _new_figure(figsize=(width, height), dpi=dpi, layout="constrained")
     ax = fig.subplots()
 
-    # Alternating bands behind whole amino-acid groups, so the eye can find a residue's rows
-    # without reading every tick label.
-    start = 0
-    for i, (aa, _codon) in enumerate(rows + [("", "")]):
-        if i == len(rows) or aa != rows[start][0]:
-            if (rows[start][0] and
-                    sorted({a for a, _ in rows}).index(rows[start][0]) % 2 == 0):
-                ax.add_patch(Rectangle((-0.5, start - 0.5), n_codons, i - start,
-                                       facecolor="0.92", edgecolor="none", zorder=0))
-            start = i
+    # The amino-acid grouping is a rule at each boundary and one letter per residue out in the
+    # margin, left of the codon labels. Shading the data area cannot work here: the palest cell
+    # is one member, and a background tint at that weight is indistinguishable from it, so
+    # structure and value would read as the same thing. Offsets are in points rather than axes
+    # fractions, so the letters sit the same distance out whatever the figure's width.
+    first, xlabel = _codon_axis(spec, n_codons)
+    on_axis = ax.get_yaxis_transform()
+    # Each rule runs a little past the left spine so the division reads across the residue
+    # letter and the codon labels, not just the map. The overhang is set in points and
+    # converted, so it looks the same on a narrow figure and a wide one.
+    overhang = 0.62 / max(1.0, width - 1.2)
+    for k, (aa, lo, hi) in enumerate(groups):
+        ax.annotate(aa, xy=(0, (lo + hi - 1) / 2), xycoords=on_axis, xytext=(-25, 0),
+                    textcoords="offset points", ha="center", va="center", fontsize=10,
+                    fontweight="bold", annotation_clip=False)
+        if k:
+            ax.axhline(lo - 0.5, xmin=-overhang, color="black", linewidth=0.8, zorder=4,
+                       clip_on=False)
+    ax.set_ylabel("Amino acid and codon", labelpad=22)
 
     biggest = max((v for row in counts for v in row), default=1)
     masked = [[(v if v else float("nan")) for v in row] for row in counts]
     norm = LogNorm(vmin=1, vmax=max(biggest, 2)) if log and biggest > 1 else None
     # A single-hue ramp, palest at one member and darkest at all of them, so the frozen
     # reference reads as the strong path and the one-off substitutions stay quiet. A diverging
-    # or rainbow map inverts that and the eye lands on the substitution bands instead. The
-    # ramp starts partway in, because Blues begins at white and a single-member cell drawn
-    # white is a cell you cannot see at all.
+    # or rainbow map inverts that and the eye lands on the substitution rows instead. The ramp
+    # starts partway in, because Blues begins at white and a single-member cell drawn white is
+    # a cell you cannot see at all.
     base = plt.get_cmap("Blues")
     cmap = LinearSegmentedColormap.from_list(
-        "codonmap", [base(v) for v in [0.22 + 0.78 * i / 255 for i in range(256)]]
+        "codonmap", [base(v) for v in [0.26 + 0.74 * i / 255 for i in range(256)]]
     )
     mesh = ax.imshow(masked, aspect="auto", interpolation="nearest", origin="upper",
                      cmap=cmap, norm=norm, zorder=2,
-                     extent=(-0.5, n_codons - 0.5, len(rows) - 0.5, -0.5))
+                     extent=(first - 0.5, first + n_codons - 0.5,
+                             len(rows) - 0.5, -0.5))
 
     ax.set_yticks(range(len(rows)))
-    ax.set_yticklabels([f"{aa} {codon}" for aa, codon in rows], fontsize=6,
-                       fontfamily="monospace")
-    ax.set_xlabel("Codon position (CDS)")
-    ax.set_ylabel("Codon, grouped by amino acid")
-    what = "the reference" if reference_only else f"{len(seqs)} members"
-    ax.set_title(f"Codon map, {spec.name}  ({what}, {spec.optimization.species})", loc="left")
-    ax.set_xlim(-0.5, n_codons - 0.5)
+    ax.set_yticklabels([codon for _aa, codon in rows], fontsize=6)
+    ax.tick_params(axis="y", length=0, pad=2)
+    ax.set_xlabel(xlabel)
+    ax.set_xlim(first - 0.5, first + n_codons - 0.5)
     ax.set_ylim(len(rows) - 0.5, -0.5)
-    bar = fig.colorbar(mesh, ax=ax, pad=0.01, fraction=0.025)
+
+    # Both keys go in a footer under the map. The figure is tall and narrow, so a colourbar
+    # down the right side spends width the data wants and leaves the legend nowhere sensible
+    # to sit.
+    # The WT residue over each column, so a codon row reads against what the wild type has at
+    # that position. Skipped rather than overlapped when a column is narrower than a letter:
+    # the plot area is roughly the figure less its margins, and below about 4 points per
+    # column the letters collide into a smear.
+    per_column = (width - 1.7) * 72 / max(n_codons, 1)
+    if wt_track and library.reference is not None and per_column >= 4.0:
+        residues = translate(library.reference)[:n_codons]
+        top = ax.secondary_xaxis("top")
+        top.set_xticks(range(first, first + n_codons))
+        top.set_xticklabels(list(residues), fontsize=min(6.5, per_column * 0.9))
+        top.tick_params(length=0, pad=1.5)
+        for side in top.spines.values():
+            side.set_visible(False)
+        drew_track = True
+    else:
+        drew_track = False
+
+    # Set after the track, so the title clears the residue letters rather than colliding with
+    # them. Reading the title back to re-pad it does not work: get_title defaults to the centre
+    # title and this one is set left, so it would come back empty.
+    what = "the reference" if reference_only else f"{len(seqs)} members"
+    ax.set_title(f"Codon map, {spec.name}  ({what}, {spec.optimization.species})",
+                 loc="left", pad=14 if drew_track else 6)
+
+    bar = fig.colorbar(mesh, ax=ax, orientation="horizontal", location="bottom",
+                       shrink=0.42, aspect=34, pad=0.015, anchor=(0.0, 1.0))
     bar.set_label("members carrying this codon here", fontsize=7)
     bar.ax.tick_params(labelsize=6)
-    fig.tight_layout()
-    return fig
+    # Plain counts rather than mathtext powers, since these are members and 1/10/100 reads
+    # more directly than 10^0.
+    bar.ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _pos: f"{v:g}"))
+    bar.ax.xaxis.set_minor_formatter(NullFormatter())
+
+    # An empty cell is the one fill the colourbar does not explain. Sat beside the bar rather
+    # than under it, so the footer is one line.
+    fig.legend(handles=[Patch(facecolor="white", edgecolor="0.6",
+                              label="no member carries this codon here")],
+               loc="center left", bbox_to_anchor=(1.06, 0.5), bbox_transform=bar.ax.transAxes,
+               frameon=False, fontsize=7, handlelength=1.4, borderaxespad=0)
+    return _apply_font(fig)

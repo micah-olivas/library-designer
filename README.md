@@ -149,11 +149,11 @@ lib.check(fmt="text")     # the report as a plain string, for a log
 lib.check(fmt="dict")     # every field plus passed/issues/advisories, ready for JSON
 ```
 
-`export_all` writes two QC figures. `<name>_codon_usage.png` plots host codon-usage
-frequency along the CDS, the WT as a line and each substitution's codon as a point.
-`<name>_codon_matrix.png` is the codon map: codons down the y axis grouped by amino acid,
-each group banded and ordered most- to least-used in the host, CDS position across the x
-axis, and each cell counting the members carrying that codon there. The frozen reference
+`export_all` writes two QC figures, both into a `qc/` subdirectory of the run. `codon_usage.png`
+plots host codon-usage frequency along the CDS, the WT as a line and each substitution's codon
+as a point. `codon_matrix.png` is the codon map: codons down the y axis grouped by amino acid,
+each group divided by a rule and labelled with one letter in the margin, CDS position across
+the x axis, and each cell counting the members carrying that codon there. The frozen reference
 reads as a dark path and the stamped substitutions as pale marks off it, so a codon drawn
 low in its own band is one the design had to compromise on. `lib.plot_codon_matrix()`
 returns it for a notebook, with `reference_only=True` to plot the WT alone.
@@ -164,6 +164,26 @@ each cell a couple of pixels wide and a long CDS goes soft at the lower setting.
 a figure headed into a manuscript: `lib.plot_codon_matrix(dpi=600)`,
 `lib.to_qc_plots(path, dpi=600)`, or `lib.export_all("out", dpi=600)` for both QC images at
 once.
+
+`truncation` drops residues from the designed region, and `truncation_terminus` says which
+end they come off, `"N"` (the default, an initiator Met or a leader) or `"C"` (a tail such as
+a purification tag). Only the designed region is scanned and encoded, but variant names stay
+on full-protein numbering, so an N-terminal truncation shifts them and a C-terminal one does
+not. Supply `cds` either pre-trimmed or full-length; a full-length CDS is trimmed to match the
+truncation, off the same end.
+
+With a starting vector, truncating holds those residues back rather than deleting them. The
+destination vector keeps their codons and supplies them, so the assembled clone still encodes
+the whole `protein_sequence` while the library only encodes the designed region. The insert
+locus shrinks to that region, which moves the fused overhang: with two residues held back off
+the N terminus the vector presents the last four bases of the retained codons rather than the
+backbone bases before the CDS, so `adaptor_5` has to carry those instead. QC reports the
+mismatch naming both sequences if it does not.
+
+The maps say which part comes from where. `destination.gb` gives the held-out codons a `CDS`
+feature labelled as supplied by the vector, and on each clone in `assembled_vectors/` the
+`CDS` feature spans the whole coding sequence, held-out codons included, with those codons
+marked separately.
 
 Substitutions accept amino acids, where the optimizer picks the codon, or literal codons (e.g. `"TAG"`), which are placed verbatim and protected. Codon-optimization parameters (species, method, GC window, iterations) live on `CodonOptimizationParams` and are recorded in `to_design_specs()`, so every order documents how it was generated.
 
@@ -302,6 +322,63 @@ Turning the search on rewrites every oligo, so re-order the pool rather than mix
 `lib.design_specs["tiled"]` records which layout was used and what the overhangs cost either
 way.
 
+### Amplification specificity
+
+A pool is pulled apart with the constant regions on its oligos, a tile's primer pair or the
+adaptors every oligo carries. That works if each of those regions has one binding site. QC
+takes each of them and looks for the longest duplex reaching back from its 3' end, the end a
+polymerase extends from, that it could form where it should not: inside a variable region,
+inside another oligo's flank, or in the destination-vector backbone. Both strands are
+searched, and a 3' adaptor is scored as the primer you would order for it, its reverse
+complement, so the base next to the variable region is the one that has to be annealed.
+
+The whole handle pairing a second time fails the report, since a primer with two binding
+sites cannot amplify one sublibrary out of the pool. Anything shorter is an advisory: whether
+14 of 20 bases prime depends on the annealing temperature you run at, so the finding is
+reported and the call is yours. Duplexes of 12 to 14 paired bases are collapsed into a count
+to keep a report on a large pool readable.
+
+A duplex may carry one internal mismatch. Scoring exact runs alone would take a primer whose
+last five bases pair, then one mismatches, then fourteen more pair, and call it a five-base
+run, when it is a 19-of-20 duplex that primes readily. The last three bases have to pair
+whatever the budget is, since a mismatch at or beside the 3' base leaves nothing to extend
+from. A mismatched duplex is only ever an advisory, so no design's verdict rests on how a
+mismatch is weighted, and `mismatches=` moves the budget: 0 for exact runs only, 2 to look
+harder. On the bundled glucokinase DMS (8842 members) budget 1 reports exactly what budget 0
+does and takes 0.27 s; budget 2 adds four more findings, all of them chance duplexes.
+
+```python
+lib.mispriming()                              # one row per duplex, worst first
+lib.mispriming(extra=["ACGT..."])             # score a primer the library does not carry
+lib.mispriming(min_anneal=10)                 # report shorter duplexes too
+lib.mispriming(mismatches=0)                  # exact runs only
+```
+
+The table gives `paired` (bases that pair), `aligned` (how long the duplex is), and
+`mismatches` (how many bases inside it do not), so a clean run reads with `paired == aligned`
+and `mismatches == 0`.
+
+A primer passed to `extra=` loses its whitespace and case first, then is refused with the
+reason if it is under 8 bases or carries anything but A/C/G/T. A run that short turns up by
+chance in any sequence and exact matching cannot score an ambiguity code, so the alternative
+would be an empty table that reads like a clean result. An adaptor the design itself carries
+can legitimately be shorter than a primer, being site plus spacer plus overhang, so that one
+is named in the advisories as unscored rather than refused.
+
+Each member is the reference with one codon swapped, so the variable region is checked as the
+reference plus a window around each member's own codon. A member's own duplex is only reported
+when it covers that codon and pairs more bases than the same duplex pairs on the WT, so a site
+the reference already has is reported once against the reference rather than once per member
+that shares the neighbourhood. The backbone is read as the plasmid outside the insert locus, so
+a site spelled half in the backbone and half in the insert is not looked for.
+
+Setting `tiled.screen_primers` makes the tiler pass over a primer whose 3' end would anneal to
+the coding sequence, to the backbone, or to a primer it has already drawn, so a tiled pool
+comes out clean rather than being told about it afterwards. It is off by default, since it
+changes which primers a design draws and so the oligos it emits. A primer set given as
+explicit forward/reverse pairs is used as given either way, and QC reports the findings
+whether or not the screen is on.
+
 ### Assembly simulation
 
 With a destination vector in play, QC stops reading the sequences and starts putting them
@@ -374,7 +451,7 @@ lib.to_primer_order(out / "primers.csv")         # per-tile amplification primer
 lib.to_vectors(out / "vectors.csv")              # per-tile Golden Gate destination vectors
 ```
 
-The WT reference is either codon-optimized (the default) or a native CDS supplied with `cds=`. Designed sequences are screened for enzyme sites to ensure orthogonality. Orthogonal primers come from a validated set ([Subramanian et al. 2018](https://doi.org/10.1093/synbio/ysx008)) by default, or may be provided with `tiled.primer_set=<path>`.
+The WT reference is either codon-optimized (the default) or a native CDS supplied with `cds=`. Designed sequences are screened for enzyme sites to ensure orthogonality. Orthogonal primers come from a validated set ([Subramanian et al. 2018](https://doi.org/10.1093/synbio/ysx008)) by default, or may be provided with `tiled.primer_set=<path>`. A published set is orthogonal to the others in it, not to your CDS or your backbone, so each drawn primer is also checked against the pool it will sit in (see [Amplification specificity](#amplification-specificity)).
 
 Each tile also gets its own WT member, `WT_Tile_0` and so on, which is that tile's window taken straight from the reference and flanked by the same primers as its mutants. Since a sublibrary is amplified and assembled on its own, this is the unmutated clone you sequence and normalize that tile against. These rows are in the pooled order alongside the mutants. The single `WT` row remains in `lib.df` for the record and carries no oligo of its own. Set `tiled.wt_controls = false` to order only the mutants.
 
@@ -438,6 +515,9 @@ variable region to write. With a starting vector set the cloning outputs come to
 `to_vectors` and `to_vector_maps` for either kind, and `to_assembled_vectors` for a
 standard library. Pass `vectors=False` to leave the cloning outputs out, or
 `oligos=False` to skip the per-oligo directory.
+
+Both QC plots come as well, in a `qc/` subdirectory: `codon_usage.png` and
+`codon_matrix.png`. Pass `plots=False` to skip them.
 
 The per-oligo files land in `oligos/`, one per member. They are annotated GenBank by
 default, marking the coding stretch the oligo carries, the mutated codon, and every Type

@@ -240,6 +240,43 @@ lib.destination_vector(strict=False)    # build it anyway and look""",
           "read before ordering.")],
     ),
     (
+        "mispriming", "Amplification specificity",
+        "A pool is pulled apart with the constant regions on its oligos, a tile's primer pair "
+        "or the adaptors every oligo carries, so each of those has to have one binding site. "
+        "QC takes each one and looks for the longest duplex reaching back from its 3' end, the "
+        "end a polymerase extends from, that it could form where it should not: inside a "
+        "variable region, inside another oligo's flank, or in the destination-vector backbone. "
+        "Both strands are searched, and a 3' adaptor is scored as the primer you would order "
+        "for it, its reverse complement, so the base next to the variable region is the one "
+        "that has to be annealed. The whole handle pairing a second time fails the report. "
+        "Anything shorter is an advisory, since whether 14 of 20 bases prime depends on the "
+        "annealing temperature you run at. A duplex may carry one internal mismatch, because "
+        "exact runs alone would score a primer whose last five bases pair, then one mismatches, "
+        "then fourteen more pair as five bases and let it through; the last three bases have to "
+        "pair regardless, since a mismatch there leaves nothing to extend from. A primer passed "
+        "to <code>extra</code> is refused with the reason if it is under 8 bases or carries "
+        "anything but A/C/G/T, rather than coming back as an empty table that reads like a "
+        "clean result. <code>screen_primers</code> makes the tiler pass "
+        "over a primer that would prime on the CDS, on the backbone, or on a primer it has "
+        "already drawn, so a tiled pool comes out clean instead of being told about it "
+        "afterwards.",
+        """lib.mispriming()                    # one row per duplex, worst first
+lib.mispriming(extra=["ACGT..."])   # score a primer the library does not carry
+lib.mispriming(min_anneal=10)       # report shorter duplexes too
+lib.mispriming(mismatches=0)        # exact runs only; 2 looks harder
+
+rep = lib.check()
+rep.mispriming_issues       # a flank with a second binding site, which fails
+rep.mispriming_advisories   # a shorter 3' run, reported but not a verdict
+
+# Draw only primers that prime nowhere else in the pool or the backbone:
+spec.tiled = TiledAssemblyParams(oligo_budget=300, screen_primers=True)""",
+        [("html", "mispriming",
+          "<code>mispriming()</code> on the bundled glucokinase pool. The one finding is a clean "
+          "12-base duplex at the 3' end of tile5's forward primer that a mutated codon spells in "
+          "one member, too short to prime on its own at a normal annealing temperature.")],
+    ),
+    (
         "boundaries", "Moving the boundaries",
         "A tiled design does not pick its overhangs, so the tile boundary is the only handle "
         "on them. The budget caps a tile and the balanced split sits under that cap, which "

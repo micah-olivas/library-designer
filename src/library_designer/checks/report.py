@@ -17,6 +17,12 @@ library adds the per-oligo and per-tile-vector checks in ``checks/tiled.py``. A 
 library that names a starting vector adds the adaptor-against-the-plasmid checks in
 ``checks/vector.py``, which is the only place a construct that looks clean on its own can
 be caught not fitting the backbone it is meant to clone into.
+
+One more runs on any library that carries constant flanks. ``checks/mispriming.py`` asks
+whether the flanks the pool is amplified with, a tile's primer pair or the shared adaptors,
+anneal anywhere they should not: inside a variable region, inside another oligo's flank, or in
+the destination-vector backbone. That is a PCR failure rather than a cloning one, so it is
+checked on the flanks and the sequence around them and not on the assembled plasmid.
 """
 from __future__ import annotations
 
@@ -75,7 +81,9 @@ class CheckReport:
     Which fields can fill in depends on the library. ``oligo_extra_sites``,
     ``oligo_over_budget``, and ``unplaced`` come from a library that has been ``tile()``'d.
     ``adaptor_issues`` comes from a standard library that names a starting vector.
-    ``overhang_issues`` and ``vector_extra_sites`` come from either of those two. The
+    ``overhang_issues`` and ``vector_extra_sites`` come from either of those two.
+    ``mispriming_issues`` comes from any library that carries constant flanks to amplify
+    with, tile primers or adaptors. The
     assembly counts fill in whenever there is a destination vector to assemble into, tiled
     or not. Optimization, translation, enzyme sites, motifs, and the length cap are checked
     on every optimized library.
@@ -91,6 +99,11 @@ class CheckReport:
     collision, which is a hazard worth reading and not a verdict, since the overhangs come
     off the CDS rather than from an orthogonal set. ``lib.overhang_pairs()`` is the full
     table behind it.
+
+    ``mispriming_advisories`` is informational too. It names a constant flank whose 3' end
+    anneals somewhere it should not without the whole flank occurring there, which primes or
+    does not depending on the annealing temperature you run at. ``lib.mispriming()`` is the
+    full table.
     """
 
     n_variants: int
@@ -111,6 +124,9 @@ class CheckReport:
     # Adaptors vs the destination vector (empty unless spec.starting_vector is set on an
     # untiled library): missing/ambiguous cut sites, or overhangs that will not ligate.
     adaptor_issues: list[str] = field(default_factory=list)
+    # A constant flank the pool is amplified with (a tile primer, an adaptor) that occurs in
+    # full somewhere else it would prime. See checks/mispriming.py.
+    mispriming_issues: list[str] = field(default_factory=list)
     # Assembly simulation (runs whenever there is a destination vector to assemble into):
     # digest, ligate, and confirm the product is the plasmid carrying the intended variant.
     assembly_issues: list[str] = field(default_factory=list)
@@ -124,6 +140,9 @@ class CheckReport:
     # Informational only: overhang pairs that share more homology than they should without
     # being an outright collision. See checks/overhangs.py and lib.overhang_pairs().
     overhang_advisories: list[str] = field(default_factory=list)
+    # Informational only: a constant flank whose 3' end anneals somewhere it should not
+    # without the whole flank occurring there. See checks/mispriming.py and lib.mispriming().
+    mispriming_advisories: list[str] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
@@ -148,6 +167,7 @@ class CheckReport:
             and not self.unplaced
             and not self.vector_extra_sites
             and not self.adaptor_issues
+            and not self.mispriming_issues
             and not self.assembly_issues
             and self.assembly_correct == self.assembly_checked
         )
@@ -208,6 +228,7 @@ class CheckReport:
             (label, hits) for label, hits in (("tile overhangs", self.overhang_issues),
                                               ("vector enzyme sites", self.vector_extra_sites),
                                               ("adaptors vs vector", self.adaptor_issues),
+                                              ("mispriming", self.mispriming_issues),
                                               ("assembly issues", self.assembly_issues))
             if hits
         ]
@@ -254,7 +275,8 @@ class CheckReport:
                                "off_target_edits")
     _CHECKS_AFTER_PATTERNS = (
         "length_exceeded", "oligo_extra_sites", "oligo_over_budget", "overhang_issues",
-        "unplaced", "vector_extra_sites", "adaptor_issues", "assembly_issues",
+        "unplaced", "vector_extra_sites", "adaptor_issues", "mispriming_issues",
+        "assembly_issues",
     )
 
     @property
@@ -271,8 +293,8 @@ class CheckReport:
         (optimization, translation, enzyme and motif hits, length, the oligo checks,
         ``unplaced``) and sentences for the ones that judge the design as a whole
         (``overhang_issues``, ``vector_extra_sites``, ``adaptor_issues``,
-        ``assembly_issues``). Advisories are not here, they are not failures; see
-        ``advisories``.
+        ``mispriming_issues``, ``assembly_issues``). Advisories are not here, they are not
+        failures; see ``advisories``.
         """
         out: dict[str, list[str]] = {}
         for name in self._CHECKS_BEFORE_PATTERNS:
@@ -296,9 +318,10 @@ class CheckReport:
 
     @property
     def advisories(self) -> list[str]:
-        """Both informational lists in one, the reference ones then the overhang ones.
-        Worth reading, but they never affect ``passed`` or ``issues``."""
-        return list(self.reference_advisories) + list(self.overhang_advisories)
+        """Every informational list in one, the reference ones, then the overhang ones, then
+        the mispriming ones. Worth reading, but they never affect ``passed`` or ``issues``."""
+        return (list(self.reference_advisories) + list(self.overhang_advisories)
+                + list(self.mispriming_advisories))
 
     def to_dict(self) -> dict:
         """The whole report as plain data, every field plus ``passed``, ``issues``, and
@@ -443,6 +466,14 @@ def check_library(library) -> CheckReport:
         report.vector_extra_sites = v["vector_extra_sites"]
         report.reference_advisories = v["advisories"]
         report.overhang_advisories = v["overhang_advisories"]
+
+    # The constant flanks the pool is amplified with, against the variable regions, the other
+    # oligos' flanks, and the destination-vector backbone. This runs whether or not the library
+    # is tiled, since the hazard is in the PCR off the pool rather than in the cloning, and it
+    # comes back empty for a library that carries no flanks at all.
+    from .mispriming import mispriming_findings
+
+    report.mispriming_issues, report.mispriming_advisories = mispriming_findings(library)
 
     # Then put the construct together: digest, ligate, and align the product against the
     # parent. Needs something to assemble into, so a library with no destination vector

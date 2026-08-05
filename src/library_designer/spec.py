@@ -155,6 +155,13 @@ class TiledAssemblyParams:
     vector_insert: str = "AGAGACCAAAAGGTCTCA"   # BsaI drop-out placeholder inserted into each destination vector
     primer_set: str = "subramanian2018"  # bundled set name or a path to a primer-set CSV (see primers.py)
     primer_length: int = 20            # per-primer length assumed when sizing tiles to the budget
+    # Pass over a primer whose 3' end anneals to the reference CDS, to the destination-vector
+    # backbone, or to a primer already drawn, so the pool cannot be primed anywhere but on the
+    # tile it belongs to (see checks/mispriming.py). Off by default, since it changes which
+    # primers a design draws and so the oligos it emits. A paired set is used as given either
+    # way; only a pool can be drawn from selectively. QC reports these findings whether or not
+    # this is on.
+    screen_primers: bool = False
     tile_size: int | None = None       # override the per-tile window (bp); None means it is derived from the budget
     # Move the tile boundaries, within the budget, to the positions whose fused overhangs
     # share the least homology. The overhangs are read off the CDS at the boundaries, so
@@ -232,7 +239,12 @@ class LibrarySpec:
     # vector (to_vectors / to_vector_maps) and QC checks the adaptors against it.
     starting_vector: str | StartingVectorParams | None = None
     tiled: TiledAssemblyParams | None = None  # when set, use tiled-assembly layout (long CDS split across oligos)
-    truncation: int = 0                      # N-terminal residues to drop
+    truncation: int = 0                      # residues to drop, from truncation_terminus
+    # Which end ``truncation`` comes off, "N" (the default, an initiator Met or a leader) or
+    # "C" (a tail such as a purification tag). Only the designed region is scanned and only it
+    # is encoded, but variant names stay on full-protein numbering either way, so an N-terminal
+    # truncation shifts the numbering and a C-terminal one does not.
+    truncation_terminus: str = "N"
     adaptor_5: str = ""                      # 5' flanking element (lowercased on export)
     adaptor_3: str = ""                      # 3' flanking element
     avoid_patterns: list[str] = field(
@@ -313,17 +325,33 @@ class LibrarySpec:
         object.__setattr__(self, name, value)
 
     @property
+    def terminus(self) -> str:
+        """``truncation_terminus`` normalized to ``"N"`` or ``"C"``, refusing anything else
+        rather than silently truncating the wrong end."""
+        end = str(self.truncation_terminus or "N").strip().upper()
+        if end in ("N", "N-TERM", "N-TERMINUS", "5'"):
+            return "N"
+        if end in ("C", "C-TERM", "C-TERMINUS", "3'"):
+            return "C"
+        raise ValueError(
+            f"truncation_terminus must be 'N' or 'C', got {self.truncation_terminus!r}."
+        )
+
+    @property
     def designed_sequence(self) -> str:
-        """The protein the library encodes, which is ``protein_sequence`` with the first
-        ``truncation`` residues dropped. Most libraries leave ``truncation`` at 0, where
-        this is the whole protein. Read the name as "the protein being designed" rather
-        than "the truncated protein"."""
-        if self.truncation and self.truncation >= len(self.protein_sequence):
+        """The protein the library encodes: ``protein_sequence`` with ``truncation`` residues
+        dropped off ``truncation_terminus``. Most libraries leave ``truncation`` at 0, where
+        this is the whole protein. Read the name as "the protein being designed" rather than
+        "the truncated protein"."""
+        n = self.truncation
+        if n and n >= len(self.protein_sequence):
             raise ValueError(
-                f"truncation ({self.truncation}) removes the whole {len(self.protein_sequence)} "
+                f"truncation ({n}) removes the whole {len(self.protein_sequence)} "
                 "aa protein_sequence, leaving nothing to design."
             )
-        return self.protein_sequence[self.truncation:]
+        if not n:
+            return self.protein_sequence
+        return self.protein_sequence[n:] if self.terminus == "N" else self.protein_sequence[:-n]
 
     @property
     def truncated_sequence(self) -> str:
@@ -332,13 +360,43 @@ class LibrarySpec:
         code should say ``designed_sequence``."""
         return self.designed_sequence
 
+    @property
+    def numbering_offset(self) -> int:
+        """What to add to a designed-region index to get full-protein numbering.
+
+        An N-terminal truncation shifts every position by however much it removed. A
+        C-terminal one removes residues past the end, so the numbering is unchanged."""
+        return self.truncation if (self.truncation and self.terminus == "N") else 0
+
+    @property
+    def designed_cds(self) -> str | None:
+        """``cds`` narrowed to the region the library actually encodes, or None with no CDS.
+
+        This is the stretch the destination vector drops out, so with a truncation it matters
+        which one is located. Holding residues back means the plasmid keeps their codons and
+        supplies them, and the assembled clone still encodes the whole ``protein_sequence``.
+        Locating the full CDS instead would drop those codons out of the vector with nothing
+        putting them back, and the clone would come up short by the truncation.
+
+        A ``cds`` that is already narrowed is returned unchanged, so either form works.
+        """
+        if not self.cds or not self.truncation:
+            return self.cds
+        n = self.truncation * 3
+        if len(self.cds) != 3 * len(self.protein_sequence):
+            return self.cds                      # already the designed region
+        return self.cds[n:] if self.terminus == "N" else self.cds[:-n]
+
     def protein_description(self) -> str:
         """How to name the designed protein in a message, e.g. "protein_sequence" or
-        "the truncated protein_sequence (truncation=6)". Truncation is mentioned only when
-        the spec truncates, so a spec that does not never reads as if it did."""
+        "the truncated protein_sequence (truncation=6 from the N terminus)". Truncation is
+        mentioned only when the spec truncates, so a spec that does not never reads as if it
+        did, and the end is named so a C-terminal truncation is not read as an N-terminal
+        one."""
         if not self.truncation:
             return "protein_sequence"
-        return f"the truncated protein_sequence (truncation={self.truncation})"
+        return (f"the truncated protein_sequence (truncation={self.truncation} from the "
+                f"{self.terminus} terminus)")
 
     def resolve_vector(
         self, tiled: TiledAssemblyParams | None = None
@@ -437,7 +495,8 @@ class LibrarySpec:
 
     def __repr__(self) -> str:
         trunc = (
-            f"  (truncation {self.truncation}, {len(self.designed_sequence)} aa scanned)"
+            f"  (truncation {self.truncation} at the {self.terminus} terminus, "
+            f"{len(self.designed_sequence)} aa scanned)"
             if self.truncation
             else ""
         )
@@ -455,7 +514,8 @@ class LibrarySpec:
 
     def _repr_html_(self) -> str:
         trunc = (
-            f" <span style='opacity:.6'>(truncation {self.truncation}, "
+            f" <span style='opacity:.6'>(truncation {self.truncation} at the "
+            f"{self.terminus} terminus, "
             f"{len(self.designed_sequence)} aa scanned)</span>"
             if self.truncation
             else ""

@@ -329,6 +329,15 @@ def art_overhang_pairs() -> str:
     return df_preview_html(pairs.head(6), numeric={"shared", "shared_flipped"})
 
 
+def art_mispriming() -> str:
+    """Where the constant flanks of the bundled glucokinase pool anneal but should not."""
+    lib = tiled_optimized_library()
+    tab = lib.mispriming()[["handle", "region", "where", "position", "strand", "paired",
+                            "aligned", "mismatches", "matched", "risk"]]
+    return df_preview_html(tab.head(6),
+                           numeric={"position", "paired", "aligned", "mismatches"})
+
+
 def art_boundary_search() -> str:
     """What moving the boundaries buys, on the bundled glucokinase example.
 
@@ -398,6 +407,7 @@ def render_all(tmp: Path) -> dict[str, str]:
         "tiling": _safe("tiling", art_tiling),
         "overhang-matrix": _safe("overhang-matrix", art_overhang_matrix),
         "overhang-pairs": _safe("overhang-pairs", art_overhang_pairs),
+        "mispriming": _safe("mispriming", art_mispriming),
         "boundary-search": _safe("boundary-search", art_boundary_search),
         "oligo-pool": _safe("oligo-pool", art_oligo_pool, tmp),
         "primer-order": _safe("primer-order", art_primer_order, tmp),

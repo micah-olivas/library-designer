@@ -778,3 +778,151 @@ def test_padding_leaves_the_reference_cds_alone(tmp_path):
     lib = SubstitutionScan(spec).generate().codon_optimize()
     assert lib.reference == CLEAN_CDS               # not CLEAN_CDS plus a backbone base
     assert translates_to(lib.reference, _protein(CLEAN_CDS))
+
+
+# --- a truncation holds residues back for the vector to supply -------------------
+#
+# Truncating means the library does not encode those residues, not that the construct loses
+# them. The plasmid keeps their codons and supplies them, so the assembled clone still
+# encodes the whole protein_sequence and the fused overhang moves inside the retained codons.
+
+def _held_out_lib(path, truncation, a5, **kw):
+    """A library that holds ``truncation`` residues back for the vector to supply. The
+    truncation is a spec field, not a vector one, so this cannot go through _standard_lib."""
+    from library_designer import StartingVectorParams
+
+    spec = LibrarySpec(
+        name="held", protein_sequence=_protein(CLEAN_CDS), cds=CLEAN_CDS,
+        substitutions=["A"], adaptor_5=a5, adaptor_3=A3_BACKBONE, truncation=truncation,
+        starting_vector=StartingVectorParams(path=path, insert_label="insert"), **kw,
+    )
+    return SubstitutionScan(spec).generate().codon_optimize()
+
+
+def test_the_locus_is_the_designed_region_not_the_whole_cds(tmp_path):
+    from library_designer.layout.destination import resolve_insert_locus
+
+    path = _plasmid(tmp_path, CLEAN_CDS)
+    full = resolve_insert_locus(_standard_lib(path, A5_BACKBONE, A3_BACKBONE).spec)
+    assert full.end - full.start == len(CLEAN_CDS)
+
+    # With two residues held back off the N terminus the vector drops six fewer bases, and the
+    # six it keeps are the codons for those residues.
+    lib = _held_out_lib(path, 2, A5_BACKBONE)
+    d = resolve_insert_locus(lib.spec)
+    assert d.end - d.start == len(CLEAN_CDS) - 6 == len(lib.reference)
+    assert d.full_seq[d.start - 6:d.start] == CLEAN_CDS[:6]
+    assert d.start == full.start + 6 and d.end == full.end
+
+
+def test_the_vector_presents_the_overhang_from_inside_the_retained_codons(tmp_path):
+    from library_designer.layout.destination import build_destination
+
+    lib = _held_out_lib(_plasmid(tmp_path, CLEAN_CDS), 2, A5_BACKBONE)
+    dv = build_destination(lib, strict=False)
+    # Not the backbone bases any more: the junction moved into the CDS.
+    assert dv.overhang_5 == CLEAN_CDS[2:6]
+    assert dv.overhang_5 != BB5[-4:]
+    # So the untruncated adaptor no longer matches, and QC says so naming both sequences.
+    assert dv.overhangs_match is False
+    (msg,) = lib.check().issues["adaptor_issues"]
+    assert CLEAN_CDS[2:6] in msg and BB5[-4:] in msg
+
+
+def test_a_held_out_library_assembles_to_the_whole_protein(tmp_path):
+    """The check that matters: the clone is the starting plasmid with the designed region
+    swapped, and it still encodes every residue, including the held-out ones."""
+    from dnachisel import translate
+
+    from library_designer.layout.destination import resolve_insert_locus
+    from library_designer.layout.vector_io import insert_offset
+
+    # An adaptor carrying the overhang the shortened locus presents.
+    a5 = "GGCGC" + "GGTCTC" + "A" + CLEAN_CDS[2:6]
+    lib = _held_out_lib(_plasmid(tmp_path, CLEAN_CDS), 2, a5)
+
+    rep = lib.check()
+    assert rep.passed, rep.issues
+    assert rep.assembly_aligned == rep.assembly_checked == len(lib.df)
+
+    parent, wt = lib.parent_vector(), lib.assembled_product("WT")
+    assert parent == wt                                  # the WT clone is the parent
+    d = resolve_insert_locus(lib.spec)
+    at = insert_offset(d) + d.pad_5
+    assert wt[at - 6:at] == CLEAN_CDS[:6]                # supplied by the vector
+    assert translate(wt[at - 6:at + len(lib.reference)]) == _protein(CLEAN_CDS)
+
+
+def test_holding_residues_back_off_the_c_terminus_works_the_same_way(tmp_path):
+    from library_designer.layout.destination import resolve_insert_locus
+
+    lib = _held_out_lib(_plasmid(tmp_path, CLEAN_CDS), 2, A5_BACKBONE,
+                        truncation_terminus="C")
+    d = resolve_insert_locus(lib.spec)
+    assert d.end - d.start == len(CLEAN_CDS) - 6
+    assert d.full_seq[d.end:d.end + 6] == CLEAN_CDS[-6:]   # kept at the other end
+    assert lib.reference == CLEAN_CDS[:-6]
+
+
+def test_the_parent_baseline_is_the_real_plasmid_not_a_shortened_one(tmp_path):
+    """A regression. Locating the whole CDS while the oligo carried only the designed region
+    dropped the held-out codons out of the vector with nothing putting them back, and the
+    parent was rebuilt short by the same amount, so every clone matched it and QC passed."""
+    path = _plasmid(tmp_path, CLEAN_CDS)
+    plain = _standard_lib(path, A5_BACKBONE, A3_BACKBONE)
+    a5 = "GGCGC" + "GGTCTC" + "A" + CLEAN_CDS[2:6]
+    held = _held_out_lib(path, 2, a5)
+    assert len(held.parent_vector()) == len(plain.parent_vector())
+
+
+def test_the_destination_map_annotates_the_held_out_codons(tmp_path):
+    """Opening the map should show what the vector contributes. The held-out codons get a CDS
+    feature, and the fused overhang sits inside them."""
+    from Bio import SeqIO
+
+    a5 = "GGCGC" + "GGTCTC" + "A" + CLEAN_CDS[2:6]
+    lib = _held_out_lib(_plasmid(tmp_path, CLEAN_CDS), 2, a5)
+    lib.to_vector_maps(tmp_path / "vector")
+    rec = SeqIO.read(tmp_path / "vector" / "destination.gb", "genbank")
+
+    (held,) = [f for f in rec.features if "held out" in f.qualifiers.get("label", [""])[0]]
+    assert held.type == "CDS"
+    assert str(held.extract(rec.seq)) == CLEAN_CDS[:6]        # the two codons themselves
+    assert "N terminus" in held.qualifiers["label"][0]
+
+    (o5,) = [f for f in rec.features if f.qualifiers.get("label") == ["fused overhang 5'"]]
+    assert str(o5.extract(rec.seq)) == CLEAN_CDS[2:6]
+    # The overhang is drawn from inside the held-out codons, so it sits within that feature.
+    assert int(held.location.start) <= int(o5.location.start)
+    assert int(o5.location.end) <= int(held.location.end)
+
+
+def test_an_untruncated_map_has_no_held_out_feature(tmp_path):
+    from Bio import SeqIO
+
+    lib = _standard_lib(_plasmid(tmp_path, CLEAN_CDS), A5_BACKBONE, A3_BACKBONE)
+    lib.to_vector_maps(tmp_path / "vector")
+    rec = SeqIO.read(tmp_path / "vector" / "destination.gb", "genbank")
+    assert not [f for f in rec.features if "held out" in f.qualifiers.get("label", [""])[0]]
+
+
+def test_a_clone_map_spans_the_whole_cds_including_the_held_out_codons(tmp_path):
+    """The clone encodes every residue, so its CDS feature has to cover the held-out codons
+    too. Annotating the reference alone would leave them outside the CDS on every map."""
+    from Bio import SeqIO
+    from dnachisel import translate
+
+    a5 = "GGCGC" + "GGTCTC" + "A" + CLEAN_CDS[2:6]
+    lib = _held_out_lib(_plasmid(tmp_path, CLEAN_CDS), 2, a5)
+    lib.to_assembled_vectors(tmp_path / "clones", fmt="genbank")
+
+    name = str(lib.df["name"].iloc[0])
+    rec = SeqIO.read(tmp_path / "clones" / f"{name}.gb", "genbank")
+    cds = next(f for f in rec.features
+               if f.type == "CDS" and f.qualifiers.get("label") == [lib.spec.name])
+    assert len(cds.extract(rec.seq)) == len(lib.reference) + 6
+    assert len(translate(str(cds.extract(rec.seq)))) == len(lib.spec.protein_sequence)
+
+    (marked,) = [f for f in rec.features if "from the vector" in f.qualifiers.get("label", [""])[0]]
+    assert str(marked.extract(rec.seq)) == CLEAN_CDS[:6]
+    assert int(marked.location.start) == int(cds.location.start)   # at the 5' end of the CDS

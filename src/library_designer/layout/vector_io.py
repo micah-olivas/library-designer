@@ -356,8 +356,13 @@ def locating_kwargs(spec, params=None) -> dict:
     that reference extraction, tiling, and the destination vector agree on the locus.
 
     When the reference is the vector's own CDS we cannot search for it (we are about to
-    extract it), so locating leans on the label / CDS feature / anchors. Otherwise the
-    known CDS (``spec.cds``) is the search key, falling back to label / anchors.
+    extract it), so locating leans on the label / CDS feature / anchors. Otherwise the known
+    CDS is the search key, falling back to label / anchors.
+
+    The key is ``spec.designed_cds``, the stretch the library encodes, not the whole
+    ``spec.cds``. With a truncation those differ, and the locus has to be what the oligo
+    replaces: the held-out codons stay in the plasmid and supply those residues. Locating the
+    full CDS would drop them out with nothing putting them back.
 
     ``params`` is the tiled-assembly params actually in use, ``spec.tiled`` when omitted.
     Pass it so a library tiled with an explicit ``tile(params)`` locates the same insert
@@ -370,7 +375,7 @@ def locating_kwargs(spec, params=None) -> dict:
         )
     return dict(
         topology_override=vec.topology,
-        search_cds=None if vec.use_vector_cds else spec.cds,
+        search_cds=None if vec.use_vector_cds else spec.designed_cds,
         insert_label=vec.insert_label,
         anchors=vec.insert_anchors,
     )
@@ -397,6 +402,22 @@ def flanks(dest: DestinationContext, n5: int, n3: int) -> tuple[str, str]:
             "flanking sequence in the starting vector so a full terminal overhang exists."
         )
     return (left[len(left) - n5:] if n5 else ""), right[:n3]
+
+
+def backbone(dest: DestinationContext) -> list[str]:
+    """The plasmid outside the insert locus, as the stretches of DNA it really is.
+
+    A circular molecule gives one arc, running from the 3' end of the insert round the origin
+    and back to its 5' end. A linear one gives the two flanks separately, since joining them
+    would make a junction the molecule does not have. Used by the mispriming check and by the
+    primer screen in ``layout/tiled.py``, which both ask what a primer would find in the
+    backbone; neither wants the coding region, which they read from the reference instead.
+    """
+    s, e, S = dest.start, dest.end, dest.full_seq
+    if dest.topology == "circular":
+        arc = S[e:] + S[:s]
+        return [arc] if arc else []
+    return [x for x in (S[:s], S[e:]) if x]
 
 
 def terminal_contexts(dest: DestinationContext, overhang_len: int) -> tuple[str, str]:

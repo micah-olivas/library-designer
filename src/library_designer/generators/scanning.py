@@ -41,7 +41,7 @@ class SubstitutionScan:
       an amino-acid substitution is codon-optimized freely.
     - The wild-type sequence is appended as a control (name ``"WT"``).
 
-    Variant names use full-protein numbering (``truncation`` offset added back),
+    Variant names use full-protein numbering (an N-terminal ``truncation`` added back),
     e.g. ``"K7A"`` or ``"K7*"``.
     """
 
@@ -70,7 +70,7 @@ class SubstitutionScan:
         for i, wt in enumerate(seq):
             if wt == "*":
                 continue
-            position = i + 1 + spec.truncation  # 1-indexed on the full protein
+            position = i + 1 + spec.numbering_offset   # 1-indexed on the full protein
             for symbol, codon in subs:
                 if symbol == wt:
                     continue

@@ -466,6 +466,42 @@ class Library:
 
         return pair_table(self, all_pairs=all_pairs)
 
+    def mispriming(self, extra=(), min_anneal: int | None = None,
+                   mismatches: int | None = None):
+        """Where the constant flanks this pool is amplified with could anneal but should not,
+        as a DataFrame, worst first.
+
+        The handles are the tile-specific primer pairs of a tiled library, or the adaptors
+        every oligo carries in a standard one. Each is scored on the longest duplex reaching
+        back from its 3' end, the end a polymerase extends from, that it could form in a
+        variable region, in another oligo's flank, or in the destination-vector backbone.
+        ``paired`` is how many bases pair, ``aligned`` how long the duplex is, and
+        ``mismatches`` how many bases inside it do not. ``risk`` grades it: ``"collision"``
+        when the whole handle pairs, so it has a second binding site, ``"high"`` when enough
+        bases pair to anneal at a normal annealing temperature, else ``"watch"``.
+
+        A duplex may carry a mismatch, one by default, because exact matching alone scores a
+        primer whose last five bases pair, then one mismatches, then fourteen more pair as five
+        bases and lets it through. The last three bases have to pair regardless, since a
+        mismatch there leaves nothing to extend from. Pass ``mismatches=0`` for exact runs
+        only, or 2 to look harder. A mismatched duplex is never a failure, only an advisory.
+
+        ``extra`` takes sequences to score alongside the design's own flanks, 5'->3' as
+        ordered, for a primer you plan to amplify with that the library does not carry. One
+        shorter than 8 bases, or carrying anything but A/C/G/T, is refused with the reason,
+        since a run that short says nothing about specificity and a primer you asked about
+        should not come back silently unexamined. An adaptor the design carries that is too
+        short to score is named in ``rep.mispriming_advisories`` instead.
+
+        ``min_anneal`` is the fewest paired bases to report, 12 by default."""
+        from .checks.mispriming import MISMATCH_BUDGET, MIN_ANNEAL, mispriming_table
+
+        return mispriming_table(
+            self, extra=extra,
+            min_anneal=MIN_ANNEAL if min_anneal is None else min_anneal,
+            mismatches=MISMATCH_BUDGET if mismatches is None else mismatches,
+        )
+
     def plot_overhangs(self, dpi: int | None = None):
         """Return a Figure of overhang homology, every end against every other (renders
         inline in a notebook). Needs a design with a Golden Gate reaction, so ``tile()`` or a
@@ -477,11 +513,12 @@ class Library:
     def check(self, fmt: str = "report"):
         """Run QC (optimization, translation, forbidden sites, length), returning a ``CheckReport``.
 
-        Those four run for every library, and the rest depend on what it is. A tiled library gets
-        the per-oligo and per-tile-vector checks, a standard library with a starting vector
-        gets its adaptors checked against the plasmid, and either one gets the assembly
-        simulated end to end, digested, ligated, and aligned against the parent. Raises if
-        the library has not been codon-optimized.
+        Those four run for every library, and so does the mispriming check on whatever constant
+        flanks it carries (see ``lib.mispriming()``). The rest depend on what it is. A tiled
+        library gets the per-oligo and per-tile-vector checks, a standard library with a
+        starting vector gets its adaptors checked against the plasmid, and either one gets the
+        assembly simulated end to end, digested, ligated, and aligned against the parent.
+        Raises if the library has not been codon-optimized.
 
         ``fmt`` picks what you get back. ``"report"`` (the default) is the ``CheckReport``
         itself, which prints as the readable report and carries ``passed``, ``issues``, and
@@ -529,13 +566,13 @@ class Library:
                                   compare_label=compare_label, dpi=dpi or DEFAULT_DPI)
 
     def plot_codon_matrix(self, log: bool = True, reference_only: bool = False,
-                          dpi: int | None = None):
+                          wt_track: bool = True, dpi: int | None = None):
         """Return a codon-map Figure (renders inline in a notebook): which codon sits at
         every position of the CDS.
 
-        Codons run down the y axis grouped by amino acid, each group banded and ordered
-        most- to least-used in the host, so a codon drawn low in its own band is one the
-        design had to compromise on. A cell counts the members carrying that codon there, so
+        Codons run down the y axis grouped by amino acid, each group divided by a rule and
+        labelled with one letter in the margin, and ordered most- to least-used in the host,
+        so a codon drawn low in its own group is one the design had to compromise on. A cell counts the members carrying that codon there, so
         the frozen reference reads as a path and each stamped substitution as a mark off it.
         ``reference_only=True`` plots the reference alone; ``log=False`` uses a linear colour
         scale, which suits a ``SequenceSet`` whose members spread more evenly. Cells are a
@@ -543,7 +580,7 @@ class Library:
         from .viz import DEFAULT_DPI, codon_matrix_figure
 
         return codon_matrix_figure(self, log=log, reference_only=reference_only,
-                                   dpi=dpi or DEFAULT_DPI)
+                                   wt_track=wt_track, dpi=dpi or DEFAULT_DPI)
 
     def plot_tiling(self, dpi: int | None = None):
         """Return a tile-layout Figure (renders inline in a notebook). Needs a tiled
@@ -556,11 +593,18 @@ class Library:
         """Write a figure and drop it, so a long export does not accumulate open figures.
 
         With no ``dpi`` the file inherits the figure's own, so one number governs how a plot
-        looks inline and on disk instead of the two drifting apart."""
+        looks inline and on disk instead of the two drifting apart. It sets the pixel count of
+        a raster format and nothing else, so a PDF is the same either way.
+
+        A PDF keeps its text as embedded TrueType rather than matplotlib's Type 3 default, so
+        the labels open selectable and editable in a vector editor and the font is named in
+        the file. That setting is scoped to this call, since leaving it on rcParams would
+        change how the caller's own figures save."""
         import matplotlib.pyplot as plt
 
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(path, dpi=dpi or fig.dpi, bbox_inches="tight")
+        with plt.rc_context({"pdf.fonttype": 42}):
+            fig.savefig(path, dpi=dpi or fig.dpi, bbox_inches="tight")
         plt.close(fig)
 
     def to_qc_plots(self, path: str | Path, dpi: int | None = None) -> "Library":
@@ -731,11 +775,16 @@ class Library:
                    oligos: bool = True, oligo_fmt: str = "genbank",
                    dpi: int | None = None) -> "Library":
         """Write the full output set: master CSV, uSort-M ``variants.csv``, vendor order
-        form, the design-specs JSON (``<name>_design_specs.json``, the record uSort-M
-        reads), and two QC plots: codon usage along the CDS and the codon map (which codon
-        sits at each position, grouped by amino acid). Plots are best-effort; if one can't be
-        rendered the data files still export (with a warning). ``dpi`` sets their
-        resolution.
+        form, and the design-specs JSON (``<name>_design_specs.json``, the record uSort-M
+        reads).
+
+        ``qc/`` holds the QC plots, both written by default and both vector PDFs:
+        ``codon_usage.pdf``, host codon-usage frequency along the CDS, and
+        ``codon_matrix.pdf``, the codon map saying which codon sits at each position, grouped
+        by amino acid. Plots are best-effort; if one can't be rendered the data files still
+        export (with a warning). Pass ``plots=False`` to skip the directory. ``dpi`` sets the
+        resolution the figures are built at, which a PDF does not depend on, so it matters
+        only if you re-save one as an image.
 
         ``oligos/`` holds the same sequences one file per member, annotated GenBank by
         default (``oligo_fmt="fasta"`` or ``"both"`` for the other forms). Pass
@@ -795,6 +844,8 @@ class Library:
         if plots:
             from .viz import DEFAULT_DPI, codon_matrix_figure, codon_usage_figure
 
+            qc = out / "qc"
+            qc.mkdir(exist_ok=True)      # made up front, so it is there even if a plot fails
             # The codon-usage plot needs one shared reference to plot against, which a sequence
             # set has not got, so skip it there rather than warn about it on every export. The
             # codon map counts across members, so it works either way.
@@ -803,8 +854,7 @@ class Library:
                 wanted.insert(0, ("codon_usage", codon_usage_figure))
             for label, build in wanted:
                 try:
-                    self._save_figure(build(self, dpi=dpi or DEFAULT_DPI),
-                                      out / f"{name}_{label}.png")
+                    self._save_figure(build(self, dpi=dpi or DEFAULT_DPI), qc / f"{label}.pdf")
                 except Exception as exc:
                     import warnings
                     warnings.warn(

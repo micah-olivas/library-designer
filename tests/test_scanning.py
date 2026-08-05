@@ -41,8 +41,8 @@ def test_every_variant_round_trips_to_intended_protein(mbo038):
 
 
 def test_single_wt_reference_invariant(mbo038):
-    # On the *codon-optimized* reference (not a native-CDS fixture): every member is
-    # matches the frozen reference except within its own stamped codon.
+    # On the *codon-optimized* reference (not a native-CDS fixture): every member matches
+    # the frozen reference except within its own stamped codon.
     ref = mbo038.reference
     saw_mutant = False
     for dna, idx in zip(mbo038.df["variable_dna"], mbo038.df["mut_index"]):
@@ -556,7 +556,9 @@ def test_designed_sequence_drops_the_truncation_and_says_so():
                        truncation=2)
     assert spec.designed_sequence == "AILV"
     assert spec.truncated_sequence == "AILV"
-    assert spec.protein_description() == "the truncated protein_sequence (truncation=2)"
+    assert spec.protein_description() == (
+        "the truncated protein_sequence (truncation=2 from the N terminus)"
+    )
 
 
 def test_a_cds_mismatch_only_blames_truncation_when_the_spec_truncates():
@@ -577,7 +579,7 @@ def test_a_cds_mismatch_only_blames_truncation_when_the_spec_truncates():
                         truncation=2, cds="ATGAAAGCTATTTTGGTC")
     with pytest.raises(ValueError) as exc:
         build_reference(trunc)
-    assert "the truncated protein_sequence (truncation=2)" in str(exc.value)
+    assert "the truncated protein_sequence (truncation=2 from the N terminus)" in str(exc.value)
 
 
 # --- one FASTA per oligo ------------------------------------------------------
@@ -770,10 +772,23 @@ def test_codon_matrix_groups_rows_by_amino_acid_and_counts_members(mbo038):
     assert rows[0][1] == ranked["A"][0]          # the preferred codon leads its group
 
     fig = mbo038.plot_codon_matrix()
-    (ax,) = [a for a in fig.axes if a.get_xlabel()]      # the map, not the colorbar
+    (ax,) = [a for a in fig.axes if a.get_images()]      # the map, not the colourbar
+    # Ticks name the codon. The amino acid is one larger letter per group out in the margin,
+    # so a residue is read once rather than repeated down every row of its block.
     labels = [t.get_text() for t in ax.get_yticklabels()]
-    assert labels[0].split()[0] <= labels[-1].split()[0]  # amino acids in order down the axis
-    assert "F TTT" in labels and "*" in " ".join(labels)   # the amber scan gets its own band
+    assert "TTT" in labels and "GCG" in labels
+    assert all(len(t) == 3 for t in labels)              # codon only, no residue prefix
+
+    letters = [a.get_text() for a in ax.texts]
+    assert letters == sorted({aa for aa, _ in _codon_rows("e_coli", set(
+        mbo038.df["mut_residue"].dropna().astype(str)) | set(mbo038.spec.designed_sequence))})
+    assert "*" in letters and letters == sorted(letters)  # amber included, residues in order
+    assert len(letters) < len(labels)                     # one letter per group, not per row
+
+    # Grey banding is gone; the grouping is a black rule at each boundary instead.
+    rules = [ln for ln in ax.get_lines() if ln.get_color() == "black"]
+    assert len(rules) == len(letters) - 1                 # a rule between groups, not above the first
+    assert not [p for p in ax.patches if p.get_facecolor()[:3] == (0.92, 0.92, 0.92)]
 
     # One cell per position carries the reference codon, so the busiest cell is a whole
     # sublibrary's worth of members and the quietest is a single substitution.
@@ -794,7 +809,7 @@ def test_the_codon_map_of_the_reference_alone_has_one_cell_per_position(mbo038):
     import numpy as np
 
     fig = mbo038.plot_codon_matrix(reference_only=True)
-    (ax,) = [a for a in fig.axes if a.get_xlabel()]
+    (ax,) = [a for a in fig.axes if a.get_images()]
     (im,) = ax.get_images()
     data = np.array(im.get_array(), dtype=float)
     filled = np.isfinite(data).sum(axis=0)
@@ -802,10 +817,16 @@ def test_the_codon_map_of_the_reference_alone_has_one_cell_per_position(mbo038):
     assert np.nanmax(data) == 1
 
 
-def test_export_all_writes_both_qc_plots(mbo038, tmp_path):
+def test_export_all_writes_both_qc_plots_in_a_qc_subdir(mbo038, tmp_path):
     mbo038.export_all(tmp_path / "out", plots=True)
-    pngs = sorted(p.name for p in mbo038.output_dir.glob("*.png"))
-    assert pngs == ["hAcyP1_codon_matrix.png", "hAcyP1_codon_usage.png"]
+    qc = mbo038.output_dir / "qc"
+    assert sorted(p.name for p in qc.glob("*.png")) == ["codon_matrix.png", "codon_usage.png"]
+    assert not list(mbo038.output_dir.glob("*.png"))   # nothing left loose in the run dir
+
+
+def test_export_all_skips_the_qc_subdir_when_plots_are_off(mbo038, tmp_path):
+    mbo038.export_all(tmp_path / "out", plots=False)
+    assert not (mbo038.output_dir / "qc").exists()
 
 
 def test_dpi_is_settable_on_every_plot_and_reaches_the_file(mbo038, tmp_path):
@@ -830,7 +851,214 @@ def test_dpi_is_settable_on_every_plot_and_reaches_the_file(mbo038, tmp_path):
     assert high.width > low.width * 2.5
 
     mbo038.export_all(tmp_path / "out", dpi=300)
-    matrix = Image.open(mbo038.output_dir / "hAcyP1_codon_matrix.png")
+    matrix = Image.open(mbo038.output_dir / "qc" / "codon_matrix.png")
     mbo038.export_all(tmp_path / "out2", dpi=100)
-    smaller = Image.open(mbo038.output_dir / "hAcyP1_codon_matrix.png")
+    smaller = Image.open(mbo038.output_dir / "qc" / "codon_matrix.png")
     assert matrix.width > smaller.width * 2.5
+
+
+# --- which terminus the truncation comes off ----------------------------------
+
+_TRUNC_PROTEIN = "MKAILVDEQ"                        # 9 aa
+_TRUNC_CDS = "ATGAAAGCTATTTTGGTTGATGAACAA"         # 27 bp, encodes it
+
+
+def _trunc_spec(**kw):
+    kw.setdefault("cds", _TRUNC_CDS)
+    return LibrarySpec(name="t", protein_sequence=_TRUNC_PROTEIN, substitutions=["A"], **kw)
+
+
+def test_truncation_defaults_to_the_n_terminus():
+    spec = _trunc_spec(truncation=2)
+    assert spec.terminus == "N"
+    assert spec.designed_sequence == "AILVDEQ"      # MK removed
+    assert spec.numbering_offset == 2
+
+
+def test_a_c_terminal_truncation_takes_residues_off_the_other_end():
+    spec = _trunc_spec(truncation=2, truncation_terminus="C")
+    assert spec.terminus == "C"
+    assert spec.designed_sequence == "MKAILVD"      # EQ removed
+    # Nothing was removed before residue 1, so full-protein numbering is unchanged.
+    assert spec.numbering_offset == 0
+
+
+def test_the_terminus_is_named_in_messages_and_the_repr():
+    n = _trunc_spec(truncation=2)
+    c = _trunc_spec(truncation=2, truncation_terminus="C")
+    assert "from the N terminus" in n.protein_description()
+    assert "from the C terminus" in c.protein_description()
+    assert "at the C terminus" in repr(c)
+    assert _trunc_spec().protein_description() == "protein_sequence"   # silent when 0
+
+
+def test_an_unknown_terminus_is_refused():
+    with pytest.raises(ValueError, match="truncation_terminus must be 'N' or 'C'"):
+        _trunc_spec(truncation=1, truncation_terminus="middle").designed_sequence
+
+
+def test_a_full_length_cds_is_trimmed_to_the_designed_region():
+    """The truncation is stated once and applies to the protein and to the DNA encoding it,
+    so a full-length CDS is trimmed rather than refused."""
+    from library_designer.optimize.backbone import build_reference
+
+    n = build_reference(_trunc_spec(truncation=2))
+    assert n == _TRUNC_CDS[6:]                       # first two codons dropped
+    assert len(n) == 3 * len("AILVDEQ")
+
+    c = build_reference(_trunc_spec(truncation=2, truncation_terminus="C"))
+    assert c == _TRUNC_CDS[:-6]                      # last two codons dropped
+
+
+def test_an_already_trimmed_cds_is_still_accepted():
+    """Both forms work, so a spec that used to pass a pre-trimmed CDS keeps working."""
+    from library_designer.optimize.backbone import build_reference
+
+    spec = _trunc_spec(truncation=2, cds=_TRUNC_CDS[6:])
+    assert build_reference(spec) == _TRUNC_CDS[6:]
+
+
+def test_a_cds_matching_neither_form_is_still_refused():
+    from library_designer.optimize.backbone import build_reference
+
+    wrong = "ATG" + _TRUNC_CDS[3:]                   # right length, wrong residues
+    spec = LibrarySpec(name="t", protein_sequence="MWAILVDEQ", substitutions=["A"],
+                       truncation=2, cds=wrong)
+    with pytest.raises(ValueError, match="does not translate to"):
+        build_reference(spec)
+
+
+def test_variant_names_follow_the_truncated_end():
+    """Names stay on full-protein numbering. An N-terminal truncation shifts them; a
+    C-terminal one cannot, since it removes residues past the end."""
+    n = SubstitutionScan(_trunc_spec(truncation=2)).generate()
+    c = SubstitutionScan(_trunc_spec(truncation=2, truncation_terminus="C")).generate()
+
+    # An alanine scan skips the position that is already Ala, which is residue 3 in both, so
+    # compare against the designed span minus that one.
+    n_pos = sorted(int(p) for p in n.df["position"].dropna())
+    c_pos = sorted(int(p) for p in c.df["position"].dropna())
+    assert n_pos == [4, 5, 6, 7, 8, 9]               # designed span is residues 3..9
+    assert c_pos == [1, 2, 4, 5, 6, 7]               # designed span is residues 1..7
+
+    # And the residue letter in each name is the one at that full-protein position.
+    for df in (n.df, c.df):
+        for name, pos, wt in zip(df["name"], df["position"], df["wt_residue"]):
+            if pd.isna(pos):
+                continue
+            assert _TRUNC_PROTEIN[int(pos) - 1] == wt == str(name)[0]
+
+
+def test_compare_reference_trims_a_full_length_paste_to_the_designed_region():
+    """The same rule as spec.cds: a truncation applies to the protein and to any DNA
+    encoding it. Comparing untrimmed would read the two out of frame by the truncation and
+    report almost every codon as different."""
+    spec = LibrarySpec(name="c", protein_sequence="MKAILVDEQ", substitutions=["A"],
+                       cds="ATGAAAGCTATTTTGGTTGATGAACAA", truncation=2)
+    lib = SubstitutionScan(spec).generate().codon_optimize()
+    assert len(lib.reference) == 21                       # MK dropped
+
+    full = "ATGAAAGCTATTTTGGTTGATGAACAA"                  # what a tool given the whole protein returns
+    rep = lib.compare_reference(full, label="ext")
+    assert rep.protein_match                              # trimmed, not a mismatch
+    assert "trimmed by 2 codon(s) at the N terminus" in rep.protein_note
+    assert rep.codon_agreement == 1.0 and rep.n_codons == 7
+    assert "note:" in str(rep) and "!" not in str(rep).split("\n")[1]
+
+    # An already-trimmed paste still works and says nothing about trimming.
+    same = lib.compare_reference(full[6:], label="ext")
+    assert same.protein_match and same.protein_note == ""
+
+
+def test_compare_reference_still_reports_a_genuinely_different_protein():
+    spec = LibrarySpec(name="c", protein_sequence="MKAILVDEQ", substitutions=["A"],
+                       cds="ATGAAAGCTATTTTGGTTGATGAACAA", truncation=2)
+    lib = SubstitutionScan(spec).generate().codon_optimize()
+    rep = lib.compare_reference("ATGTGGTGGTGGTGGTGGTGGTGG", label="ext")
+    assert not rep.protein_match
+    assert "the designed region" in rep.protein_note or "differing at" in rep.protein_note
+
+
+def test_the_plots_number_codons_the_way_variant_names_do():
+    """A truncated library's plots have to agree with its labels. The x axis is full-protein
+    numbering, so an N-terminal truncation starts it at the first designed residue."""
+    import matplotlib
+    matplotlib.use("Agg")
+
+    plain = SubstitutionScan(_trunc_spec()).generate().codon_optimize()
+    n = SubstitutionScan(_trunc_spec(truncation=2)).generate().codon_optimize()
+    c = SubstitutionScan(
+        _trunc_spec(truncation=2, truncation_terminus="C")).generate().codon_optimize()
+
+    def x_span(lib):
+        fig = lib.plot_codon_matrix()
+        (ax,) = [a for a in fig.axes if a.get_images()]
+        lo, hi = ax.get_xlim()
+        return round(lo + 0.5), round(hi - 0.5), ax.get_xlabel()
+
+    assert x_span(plain) == (1, 9, "Codon position (CDS)")
+    lo, hi, label = x_span(n)
+    assert (lo, hi) == (3, 9) and "starts at 3" in label          # residues 3..9
+    assert x_span(c) == (1, 7, "Codon position (CDS)")             # numbering unshifted
+
+    # And the first plotted position is the first variant's own position.
+    assert lo == min(int(p) for p in n.df["position"].dropna()) - 1  # residue 3 is already Ala
+
+
+def test_the_usage_overlay_is_trimmed_to_the_designed_region():
+    """A full-length paste overlays in frame on a truncated reference rather than shifted."""
+    import matplotlib
+    matplotlib.use("Agg")
+
+    from library_designer.compare import trim_to_designed
+
+    spec = _trunc_spec(truncation=2)
+    lib = SubstitutionScan(spec).generate().codon_optimize()
+    trimmed, did = trim_to_designed(spec, _TRUNC_CDS)
+    assert did and trimmed == _TRUNC_CDS[6:]
+
+    fig = lib.plot_codon_usage(compare=_TRUNC_CDS, compare_label="ext")
+    (line,) = [ln for ln in fig.axes[0].get_lines() if ln.get_label() == "ext"]
+    xs = list(line.get_xdata())
+    assert xs[0] == 3 and len(xs) == len(lib.reference) // 3       # in frame, full width
+
+    # An already-designed-region sequence is left alone.
+    assert trim_to_designed(spec, _TRUNC_CDS[6:]) == (_TRUNC_CDS[6:], False)
+
+
+def test_the_codon_map_writes_the_wt_residue_over_each_column(mbo038):
+    """The WT amino acid above each position, so a codon row can be read against what the
+    wild type has there."""
+    import matplotlib
+    matplotlib.use("Agg")
+    from dnachisel import translate
+
+    fig = mbo038.plot_codon_matrix()
+    (ax,) = [a for a in fig.axes if a.get_images()]
+    (track,) = ax.child_axes          # the secondary x-axis carrying the residues
+    letters = [t.get_text() for t in track.get_xticklabels()]
+    assert "".join(letters) == translate(mbo038.reference)
+
+    # Positioned on the same full-protein numbering as the map itself.
+    first = mbo038.spec.numbering_offset + 1
+    assert [round(t) for t in track.get_xticks()][:3] == [first, first + 1, first + 2]
+    # And the title still clears it.
+    assert ax.get_title(loc="left").startswith("Codon map,")
+
+    off = mbo038.plot_codon_matrix(wt_track=False)
+    assert not [a for a in off.axes if a.get_images()][0].child_axes
+
+
+def test_the_wt_track_is_dropped_when_the_columns_are_too_narrow_to_letter():
+    """A long CDS cannot carry a legible letter per column, so the track is left off rather
+    than drawn as a smear."""
+    import matplotlib
+    matplotlib.use("Agg")
+
+    spec = LibrarySpec.from_toml(REPO / "examples" / "gck_tiled.toml")
+    gck = SubstitutionScan(spec).generate().codon_optimize()
+    assert len(gck.reference) // 3 > 400
+    fig = gck.plot_codon_matrix()
+    (ax,) = [a for a in fig.axes if a.get_images()]
+    assert not ax.child_axes                                         # no track
+    assert ax.get_title(loc="left").startswith("Codon map,")

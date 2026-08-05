@@ -5,10 +5,11 @@ whether IDT's choice would introduce a restriction/ribosome-binding motif that o
 design deliberately avoids (IDT's optimizer doesn't know about your Golden Gate
 enzymes).
 
-Both sequences are compared as coding regions only (no adaptors). Submit the protein the
-reference encodes (``spec.designed_sequence``) to IDT, which is the truncated protein when
-the spec sets ``truncation`` and the whole one otherwise. The comparison warns if the
-pasted sequence encodes a different protein.
+Both sequences are compared as coding regions only (no adaptors). Submit either the protein
+the reference encodes (``spec.designed_sequence``) or, with a truncation set, the full-length
+protein: a pasted full-length CDS is trimmed to the designed region before comparing, so the
+two are not read out of frame. The comparison warns if the pasted sequence encodes a
+different protein than either form.
 """
 from __future__ import annotations
 
@@ -36,8 +37,9 @@ class ReferenceComparison:
     ``spec.avoid_patterns``. Both count the pasted sequence only, since the reference was
     optimized to have none. ``introduces_sites`` is True when any count is nonzero.
 
-    ``protein_match`` says whether the pasted sequence translates to the reference
-    protein, and ``protein_note`` says how it differs when it does not.
+    ``protein_match`` says whether the pasted sequence translates to the reference protein.
+    ``protein_note`` says how it differs when it does not, and when it does match after being
+    trimmed to the designed region, that it was.
     """
 
     label: str
@@ -71,7 +73,7 @@ class ReferenceComparison:
         lines = [f"{self.label} vs reference:  "
                  + ("protein OK" if self.protein_match else "PROTEIN MISMATCH")]
         if self.protein_note:
-            lines.append(f"  ! {self.protein_note}")
+            lines.append(f"  {'note:' if self.protein_match else '!'} {self.protein_note}")
         lines.append(f"  codon agreement:  {self.codon_matches}/{self.n_codons} ({pct})")
         lines.append(f"  GC:               reference {self.gc_ref:.3f} | {self.label} {self.gc_other:.3f}")
         lines.append(f"  mean adaptiveness: reference {self.mean_adapt_ref:.3f} | {self.label} {self.mean_adapt_other:.3f}")
@@ -99,6 +101,25 @@ def _clean_dna(seq: str) -> str:
     return "".join(c for c in body.upper() if c in "ACGT")
 
 
+def trim_to_designed(spec, dna: str) -> tuple[str, bool]:
+    """``(dna, trimmed)``: an outside CDS narrowed to the designed region when it is the
+    full-length one and the spec truncates.
+
+    One rule, used wherever an outside sequence meets a truncated reference (the comparison
+    and the codon-usage overlay), so they cannot disagree about the frame. Off by default: a
+    sequence that is already the designed region, or that encodes a different protein, comes
+    back untouched, and the caller reports the mismatch as it would have anyway.
+    """
+    if not spec.truncation or len(dna) != 3 * len(spec.protein_sequence):
+        return dna, False
+    from dnachisel import translate
+
+    if translate(dna) != spec.protein_sequence:
+        return dna, False
+    drop = spec.truncation * 3
+    return (dna[drop:] if spec.terminus == "N" else dna[:-drop]), True
+
+
 def _gc(seq: str) -> float:
     return (seq.count("G") + seq.count("C")) / len(seq) if seq else 0.0
 
@@ -122,8 +143,9 @@ def compare_reference(library, other_dna: str, label: str = "IDT") -> ReferenceC
     length is a multiple of 3, and a mismatch is written into ``protein_note`` rather
     than raised, so the rest of the report is still there to read. The note says which
     kind of mismatch it is, a length that is not a multiple of 3, a protein of the wrong
-    length (with a truncated spec, usually the full protein where the truncated one was
-    wanted), or one that differs at some number of residues.
+    length, or one that differs at some number of residues. A full-length CDS against a
+    truncated reference is not a mismatch: it is trimmed to the designed region and the note
+    records that it was.
     """
     if library.reference is None:
         raise ValueError("Library is not codon-optimized yet, call codon_optimize() first.")
@@ -141,8 +163,17 @@ def compare_reference(library, other_dna: str, label: str = "IDT") -> ReferenceC
 
     prot_ref = translate(ref)
     prot_other = translate(other) if len(other) % 3 == 0 else None
-    protein_match = prot_other == prot_ref
     note = ""
+    # A pasted full-length CDS against a truncated reference is trimmed the same way
+    # ``build_reference`` trims ``spec.cds``: the truncation applies to the protein and to any
+    # DNA encoding it. Otherwise the two would be compared out of frame by the truncation,
+    # which reads as almost every codon differing.
+    other, trimmed = trim_to_designed(spec, other)
+    if trimmed:
+        prot_other = translate(other)
+        note = (f"{label} was the full-length CDS, trimmed by {spec.truncation} codon(s) at "
+                f"the {spec.terminus} terminus to match the designed region.")
+    protein_match = prot_other == prot_ref
     if not protein_match:
         if prot_other is None:
             note = f"{label} length {len(other)} nt is not a multiple of 3."
@@ -150,7 +181,8 @@ def compare_reference(library, other_dna: str, label: str = "IDT") -> ReferenceC
             # Only blame truncation when the spec truncates; otherwise the two are just
             # different proteins and telling the user to truncate would send them wrong.
             hint = (
-                f"Submit the truncated protein (truncation={spec.truncation}), not the full one."
+                f"Submit either the designed region ({spec.protein_description()}) or the "
+                "full-length protein, which is trimmed to match."
                 if spec.truncation
                 else "Submit the protein the reference encodes (spec.designed_sequence)."
             )
