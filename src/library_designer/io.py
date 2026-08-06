@@ -87,7 +87,9 @@ def to_full_csv(library, path: str | Path) -> None:
     """Write the master table, every column of ``lib.df`` plus the assembled construct.
 
     Adds ``sequence`` (``adaptor_5 + variable_dna + adaptor_3``, uppercase), ``length``,
-    ``gc_content`` for the variable region alone, and ``stamp_adaptiveness``, the
+    ``gc_content`` for the variable region alone, ``ordered_gc`` for the whole molecule that
+    is ordered (the assembled oligo for a tiled library, the construct otherwise, which is
+    what ``spec.gc_bounds`` judges), and ``stamp_adaptiveness``, the
     relative adaptiveness of the codon this variant carries at its own position. The
     last two are rounded to three places. ``stamp_adaptiveness`` is NA wherever there is
     no stamped position, so for the wild-type control and for every member of a sequence
@@ -112,9 +114,17 @@ def to_full_csv(library, path: str | Path) -> None:
         if isinstance(r["variable_dna"], str) and not pd.isna(r["mut_index"]) else pd.NA,
         axis=1,
     )
+    # GC of the molecule actually ordered, which is what a vendor's GC window refers to and
+    # what the gc_bounds gate judges. Kept beside gc_content, the variable region's own GC, so
+    # the two are not mistaken for each other: with adaptors on they differ.
+    from .checks.report import gc_fraction, ordered_molecules
+    ordered = ordered_molecules(library)
+    df["ordered_gc"] = df["name"].map(
+        lambda n: round(gc_fraction(ordered[str(n)]), 3) if str(n) in ordered else pd.NA
+    )
     # Group the region columns 5'->3' next to the assembled sequence for readability.
     region = ["adaptor_5", "variable_dna", "adaptor_3", "sequence", "length", "gc_content",
-              "stamp_adaptiveness"]
+              "ordered_gc", "stamp_adaptiveness"]
     front = [c for c in df.columns if c not in region]
     df = df[front + region]
     Path(path).parent.mkdir(parents=True, exist_ok=True)

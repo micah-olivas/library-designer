@@ -262,7 +262,11 @@ def test_a_sequence_set_exports_without_warning_about_a_plot_it_cannot_draw(tmp_
     # The codon map counts across members, which a sequence set has, so it is drawn. The
     # codon-usage plot needs the one shared reference it has not got, and is skipped
     # silently rather than warned about on every export.
-    assert [p.name for p in (lib.output_dir / "qc").glob("*.png")] == ["codon_matrix.png"]
+    # The codon map and the GC distribution both work on a sequence set; only the
+    # codon-usage plot needs the shared reference it has not got.
+    assert sorted(p.name for p in (lib.output_dir / "qc").iterdir()) == [
+        "codon_matrix.pdf", "gc_distribution.pdf",
+    ]
 
     with pytest.raises(ValueError, match="every member is its own gene"):
         lib.plot_codon_usage()

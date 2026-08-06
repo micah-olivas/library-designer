@@ -574,6 +574,9 @@ class Library:
         labelled with one letter in the margin, and ordered most- to least-used in the host,
         so a codon drawn low in its own group is one the design had to compromise on. A cell counts the members carrying that codon there, so
         the frozen reference reads as a path and each stamped substitution as a mark off it.
+        Residues the ``truncation`` dropped are greyed columns either side of the designed
+        window, so the map spans the protein the numbering refers to.
+
         ``reference_only=True`` plots the reference alone; ``log=False`` uses a linear colour
         scale, which suits a ``SequenceSet`` whose members spread more evenly. Cells are a
         couple of pixels wide, so raise ``dpi`` for a long CDS or a printable copy."""
@@ -581,6 +584,27 @@ class Library:
 
         return codon_matrix_figure(self, log=log, reference_only=reference_only,
                                    wt_track=wt_track, dpi=dpi or DEFAULT_DPI)
+
+    def gc_table(self):
+        """Per-member GC as a DataFrame: ``ordered_gc`` for the molecule that is ordered,
+        ``variable_gc`` for the coding region alone, the ``sublibrary`` each member belongs to,
+        and ``in_bounds`` against ``spec.gc_bounds`` (NA when no bounds are set)."""
+        from .checks.report import gc_table
+
+        return gc_table(self)
+
+    def plot_gc_distribution(self, bins: int = 24, show_variable_region: bool = True,
+                             dpi: int | None = None):
+        """Return a GC-distribution Figure (renders inline in a notebook), in two panels: the
+        distribution at its own scale, and the same against the ``spec.gc_bounds`` window so
+        the margin to the vendor's limits is visible. Measured on the molecule that is ordered,
+        stacked by sublibrary, with the coding region overlaid unless
+        ``show_variable_region=False``."""
+        from .viz import DEFAULT_DPI, gc_distribution_figure
+
+        return gc_distribution_figure(self, bins=bins,
+                                      show_variable_region=show_variable_region,
+                                      dpi=dpi or DEFAULT_DPI)
 
     def plot_tiling(self, dpi: int | None = None):
         """Return a tile-layout Figure (renders inline in a notebook). Needs a tiled
@@ -842,14 +866,17 @@ class Library:
             self.to_vector_maps(out / "vector")
             self.to_assembled_vectors(out / "assembled_vectors")
         if plots:
-            from .viz import DEFAULT_DPI, codon_matrix_figure, codon_usage_figure
+            from .viz import (
+                DEFAULT_DPI, codon_matrix_figure, codon_usage_figure, gc_distribution_figure,
+            )
 
             qc = out / "qc"
             qc.mkdir(exist_ok=True)      # made up front, so it is there even if a plot fails
             # The codon-usage plot needs one shared reference to plot against, which a sequence
             # set has not got, so skip it there rather than warn about it on every export. The
             # codon map counts across members, so it works either way.
-            wanted = [("codon_matrix", codon_matrix_figure)]
+            wanted = [("codon_matrix", codon_matrix_figure),
+                      ("gc_distribution", gc_distribution_figure)]
             if self.kind != "sequence_set":
                 wanted.insert(0, ("codon_usage", codon_usage_figure))
             for label, build in wanted:

@@ -253,9 +253,47 @@ def test_check_fmt_returns_text_or_plain_data(scan):
 
     d = scan.check(fmt="dict")
     assert isinstance(d, dict)
-    assert d["passed"] is True and d["issues"] == {} and d["advisories"] == []
+    assert d["passed"] is True and d["issues"] == {}
+    # This fixture's adaptors put the BsaI site at base 1, so it carries cleavage advisories.
+    # Advisories are informational, so they do not touch passed or issues.
+    assert d["advisories"] == d["cleavage_advisories"] and d["advisories"]
     assert d["n_variants"] == len(scan)
     assert json.loads(json.dumps(d)) == d       # straight into a run record
 
     with pytest.raises(ValueError, match="Unknown fmt"):
         scan.check(fmt="parsed")
+
+
+# --- the GC line --------------------------------------------------------------
+
+def test_the_summary_reports_the_gc_spread(scan):
+    s = scan.summary()
+    assert set(s.gc) == {"min", "median", "max", "bounds"}
+    assert s.gc["min"] <= s.gc["median"] <= s.gc["max"]
+    assert s.gc["bounds"] is None                      # this fixture sets no window
+
+    line = re_line(str(s), "  gc:")
+    assert line is not None and "median" in line
+    assert f"{s.gc['min']:.3f}" in line and f"{s.gc['max']:.3f}" in line
+    assert "window" not in line                        # nothing to compare against
+
+
+def test_the_gc_line_names_the_window_and_the_room_left():
+    spec = _spec(adaptor_5="ggtctccaagc", adaptor_3="ggtgggagacc",
+                 gc_bounds=(0.35, 0.65))
+    lib = SubstitutionScan(spec).generate().codon_optimize()
+    line = re_line(str(lib.summary()), "  gc:")
+    assert "window 35%-65%" in line and "points to spare" in line
+
+    # A window the pool breaks says so, and QC names the members separately.
+    tight = SubstitutionScan(_spec(adaptor_5="ggtctccaagc", adaptor_3="ggtgggagacc",
+                                   gc_bounds=(0.50, 0.51))).generate().codon_optimize()
+    text = str(tight.summary())
+    assert "exceeded" in re_line(text, "  gc:")
+    assert "outside gc_bounds" in text                 # the QC block, not the gc line
+
+
+def test_there_is_no_gc_line_before_optimizing():
+    lib = SubstitutionScan(_spec()).generate()
+    assert lib.summary().gc is None
+    assert re_line(str(lib.summary()), "  gc:") is None

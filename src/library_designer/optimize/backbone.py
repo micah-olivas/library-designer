@@ -178,7 +178,8 @@ def _ref_pattern_count(reference: str, pattern: str) -> int:
 
 
 def _violates(cds: str, spec: LibrarySpec, reference: str | None = None) -> bool:
-    """True if the stamped codon *introduces* a restricted motif or GC-bound break.
+    """True if the stamped codon *introduces* a restricted motif, an over-long single-base
+    run, or a GC-bound break.
 
     Judged by *count* relative to ``reference``: a match already present in the
     reference is the user's native sequence, not something the stamp created, so only
@@ -192,7 +193,7 @@ def _violates(cds: str, spec: LibrarySpec, reference: str | None = None) -> bool
     for e in spec.avoid_enzymes:
         if count_enzyme_sites(cds, e) > _ref_enzyme_count(ref, e):
             return True
-    for p in spec.avoid_patterns:
+    for p in list(spec.avoid_patterns) + spec.homopolymer_patterns:
         if len(re.findall(p, cds)) > _ref_pattern_count(ref, p):
             return True
     o = spec.optimization

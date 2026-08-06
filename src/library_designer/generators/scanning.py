@@ -37,6 +37,8 @@ class SubstitutionScan:
     (``spec.designed_sequence``, the whole protein unless ``truncation`` is set).
 
     - Positions where the substitution matches the wild-type residue are skipped.
+    - Positions in ``spec.mask_positions`` get no variants, though the residue is still
+      encoded and synthesized on every oligo.
     - A codon substitution is placed verbatim and protected during optimization;
       an amino-acid substitution is codon-optimized freely.
     - The wild-type sequence is appended as a control (name ``"WT"``).
@@ -53,7 +55,10 @@ class SubstitutionScan:
 
         Positions where the substitution is already the wild-type residue are skipped, so an
         alanine scan of a protein carrying 12 alanines gives 12 fewer members than there are
-        positions. A ``*`` in the input protein is skipped as a position too. Names carry
+        positions. A ``*`` in the input protein is skipped as a position too, and so is any
+        position in ``spec.mask_positions``, which leaves the residue in the construct but out
+        of the scan. Masking every scannable position raises rather than handing back a library
+        of nothing but the wild-type control. Names carry
         full-protein numbering even when ``truncation`` is set, so ``K7A`` means residue 7 of
         the protein you supplied. Two substitutions that resolve to the same residue symbol
         at one position would collide, and that raises rather than silently dropping one.
@@ -63,6 +68,7 @@ class SubstitutionScan:
         """
         spec = self.spec
         seq = spec.designed_sequence
+        masked = spec.masked
         subs = [_classify(s) for s in spec.substitutions]
         a5, a3 = spec.adaptor_5.upper(), spec.adaptor_3.upper()  # explicit region columns
         rows: list[dict] = []
@@ -71,6 +77,9 @@ class SubstitutionScan:
             if wt == "*":
                 continue
             position = i + 1 + spec.numbering_offset   # 1-indexed on the full protein
+            if position in masked:
+                # Still encoded and still synthesized on every oligo, just not varied.
+                continue
             for symbol, codon in subs:
                 if symbol == wt:
                     continue
@@ -102,6 +111,11 @@ class SubstitutionScan:
             }
         )
 
+        if masked and len(rows) == 1:            # only the WT control was appended
+            raise ValueError(
+                f"mask_positions {sorted(masked)} leaves no position to scan. Mask fewer "
+                "positions, or widen spec.substitutions."
+            )
         df = pd.DataFrame(rows)
         dupes = df["name"][df["name"].duplicated()].unique()
         if len(dupes):

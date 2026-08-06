@@ -245,6 +245,13 @@ class LibrarySpec:
     # is encoded, but variant names stay on full-protein numbering either way, so an N-terminal
     # truncation shifts the numbering and a C-terminal one does not.
     truncation_terminus: str = "N"
+    # Positions to leave out of the scan, 1-based on ``protein_sequence``, the same numbering
+    # variant names use. A masked residue is still synthesized on every oligo and still encoded
+    # by the reference; it just gets no variants. Use it for residues you do not want varied
+    # (a tag, a catalytic residue, the first codons after a start) while keeping the construct
+    # whole. That is the difference from ``truncation``, which takes the residues out of the
+    # designed region altogether.
+    mask_positions: list[int] = field(default_factory=list)
     adaptor_5: str = ""                      # 5' flanking element (lowercased on export)
     adaptor_3: str = ""                      # 3' flanking element
     avoid_patterns: list[str] = field(
@@ -254,6 +261,23 @@ class LibrarySpec:
     optimization: CodonOptimizationParams = field(default_factory=CodonOptimizationParams)
     platform: str | None = None              # synthesis platform: "pooled"/"arrayed" or a provider slug ("twist_oligo_pools"); see methods.py
     max_oligo_length: int | None = None      # hard synthesis-length cap (bp, incl. adaptors)
+    # GC window the molecule you order has to sit in, as ``(min, max)`` fractions, checked on
+    # the whole ordered molecule rather than on the coding region. Off by default, since the
+    # package ships no vendor registry. Twist recommend 35% to 65% for oligo pools, so
+    # ``gc_bounds=(0.35, 0.65)`` turns that gate on. Percentages are accepted too, so
+    # ``(35, 65)`` means the same thing.
+    #
+    # Not the same as ``optimization.gc_min`` / ``gc_max``, which DNA Chisel enforces on the
+    # coding region while it optimizes. This one judges what the synthesiser receives, adaptors
+    # and primers included, which is the number a vendor's spec is written against.
+    gc_bounds: tuple[float, float] | None = None
+    # The longest single-base run to allow, so ``max_homopolymer=7`` avoids runs of 8 or more.
+    # Long runs are hard to synthesize accurately and hard to read through, and vendors flag
+    # them. Off by default, like the other synthesis gates, since the limit is the vendor's to
+    # state. Unlike ``gc_bounds``, this one is both prevented and checked: the reference is
+    # optimized to avoid runs, the stamp will not introduce one, and QC screens the finished
+    # molecule for any that appear across a junction the optimizer never saw.
+    max_homopolymer: int | None = None
     # Codon optimization is stochastic, so a seed is applied on every run and recorded in
     # the design specs: the same spec gives the same library on any machine. Set to None
     # to opt out and follow the ambient RNG instead.
@@ -322,6 +346,32 @@ class LibrarySpec:
             value = _clean_sequence(value, "protein_sequence", AMINO_ACIDS, "non-amino-acid")
         elif name == "cds" and value:
             value = _clean_sequence(value, "cds", frozenset("ACGT"), "non-ACGT")
+        elif name == "max_homopolymer" and value is not None:
+            value = int(value)
+            if value < 1:
+                raise ValueError(
+                    f"max_homopolymer must be at least 1, got {value}. It is the longest run "
+                    "allowed, so 7 avoids runs of 8 or more."
+                )
+        elif name == "gc_bounds" and value is not None:
+            lo, hi = (float(v) for v in value)
+            # Percentages are read as such only when both bounds are, since GC is a fraction
+            # and nothing above 1 can be one. A mixed pair like (0.5, 65) says two different
+            # things at once and is refused rather than guessed at, which would have turned
+            # (0.5, 2.0) into a 0.5% to 2% window.
+            if lo >= 1 and hi > 1:
+                lo, hi = lo / 100, hi / 100
+            if not 0 <= lo < hi <= 1:
+                raise ValueError(
+                    f"gc_bounds must be (min, max) with 0 <= min < max <= 1, got {value!r}. "
+                    "Give both as fractions or both as percentages, so (0.35, 0.65) and "
+                    "(35, 65) are the same window."
+                )
+            value = (lo, hi)
+        elif name == "mask_positions" and value:
+            # Sorted and de-duplicated so the record reads the same however it was written,
+            # and so "is this masked" is a set lookup rather than a scan.
+            value = sorted({int(v) for v in value})
         object.__setattr__(self, name, value)
 
     @property
@@ -386,6 +436,36 @@ class LibrarySpec:
         if len(self.cds) != 3 * len(self.protein_sequence):
             return self.cds                      # already the designed region
         return self.cds[n:] if self.terminus == "N" else self.cds[:-n]
+
+    @property
+    def homopolymer_patterns(self) -> list[str]:
+        """One regex per base matching a run longer than ``max_homopolymer``, empty when the
+        limit is unset.
+
+        Written per base rather than as one alternation, because these go to DNA Chisel as
+        separate constraints and it reports which one a sequence broke.
+        """
+        n = self.max_homopolymer
+        return [f"{base}{{{n + 1},}}" for base in "ACGT"] if n else []
+
+    @property
+    def masked(self) -> set[int]:
+        """``mask_positions`` as a set, validated against ``protein_sequence``.
+
+        Positions are 1-based on the full protein, so they read the same as a variant's name
+        whether or not the spec truncates. One outside the protein is refused rather than
+        silently ignored, since it usually means the numbering was taken from something else.
+        """
+        if not self.mask_positions:
+            return set()
+        n = len(self.protein_sequence)
+        bad = [p for p in self.mask_positions if not 1 <= p <= n]
+        if bad:
+            raise ValueError(
+                f"mask_positions {bad} fall outside protein_sequence (1-{n}). Positions are "
+                "1-based on the full protein, the same numbering variant names use."
+            )
+        return set(self.mask_positions)
 
     def protein_description(self) -> str:
         """How to name the designed protein in a message, e.g. "protein_sequence" or
@@ -493,6 +573,26 @@ class LibrarySpec:
         frozen = ", CDS frozen from the vector" if v.use_vector_cds else ""
         return f"{Path(v.path).name} ({v.enzyme}, insert located by {how}{frozen})"
 
+    def _gc_bounds_line(self) -> str:
+        """The GC window for the repr, empty when the gate is off."""
+        if not self.gc_bounds:
+            return ""
+        lo, hi = self.gc_bounds
+        return f"   gc {lo:.0%}-{hi:.0%}"
+
+    def _homopolymer_line(self) -> str:
+        """The homopolymer limit for the repr, empty when the gate is off."""
+        return f"   runs<={self.max_homopolymer}" if self.max_homopolymer else ""
+
+    def _mask_line(self) -> str:
+        """The masked-positions line, empty when nothing is masked. Elided past a handful, so
+        masking a whole domain does not push the rest of the block off the screen."""
+        if not self.mask_positions:
+            return ""
+        shown = ", ".join(str(p) for p in self.mask_positions[:8])
+        more = f", and {len(self.mask_positions) - 8} more" if len(self.mask_positions) > 8 else ""
+        return f"  masked:        {shown}{more}  (encoded, not scanned)\n"
+
     def __repr__(self) -> str:
         trunc = (
             f"  (truncation {self.truncation} at the {self.terminus} terminus, "
@@ -506,11 +606,26 @@ class LibrarySpec:
             f"  protein:       {len(self.protein_sequence)} aa  {_preview(self.protein_sequence)}{trunc}\n"
             f"{uniprot}"
             f"  substitutions: {', '.join(self.substitutions)}\n"
+            f"{self._mask_line()}"
             f"  adaptors:      5' {self.adaptor_5}  |  3' {self.adaptor_3}\n"
             f"  vector:        {self._vector_line()}\n"
             f"  optimization:  {self._opt_line()}\n"
-            f"  platform:      {self.platform}   max_oligo_length={self.max_oligo_length}   seed={self.seed}"
+            f"  platform:      {self.platform}   max_oligo_length={self.max_oligo_length}"
+            f"{self._gc_bounds_line()}{self._homopolymer_line()}   seed={self.seed}"
         )
+
+    def _mask_html(self) -> str:
+        """The masked positions for the HTML table, with the residue each one holds, so the
+        row says what is being left out and not only where."""
+        shown = self.mask_positions[:12]
+        cells = " ".join(
+            f"<code>{self.protein_sequence[p - 1] if p <= len(self.protein_sequence) else '?'}"
+            f"{p}</code>" for p in shown
+        )
+        more = (f" <span style='opacity:.6'>and {len(self.mask_positions) - 12} more</span>"
+                if len(self.mask_positions) > 12 else "")
+        return (f"{cells}{more} "
+                f"<span style='opacity:.6'>(encoded, not scanned)</span>")
 
     def _repr_html_(self) -> str:
         trunc = (
@@ -527,17 +642,25 @@ class LibrarySpec:
                 f"{len(self.protein_sequence)} aa &nbsp; <code>{_esc(_preview(self.protein_sequence))}</code>{trunc}",
             ),
             ("substitutions", " ".join(f"<code>{_esc(s)}</code>" for s in self.substitutions)),
+            # Only when something is masked, so an ordinary spec's table stays short. It sits
+            # under substitutions because that is what it changes: which variants get made.
+            *((("masked", self._mask_html()),) if self.mask_positions else ()),
             *(( ("uniprot", _esc(self._uniprot_line())), ) if self.uniprot else ()),
             ("adaptors", f"5' <code>{_esc(self.adaptor_5)}</code> &nbsp; 3' <code>{_esc(self.adaptor_3)}</code>"),
             ("starting_vector", _esc(self._vector_line())),
             (
                 "avoid",
                 f"{', '.join(map(_esc, self.avoid_enzymes)) or 'no enzymes'} "
-                f"<span style='opacity:.6'>+ {len(self.avoid_patterns)} motif pattern(s)</span>",
+                f"<span style='opacity:.6'>+ {len(self.avoid_patterns)} motif pattern(s)"
+                + (f", runs of &gt;{self.max_homopolymer}" if self.max_homopolymer else "")
+                + "</span>",
             ),
             ("optimization", _esc(self._opt_line())),
             ("platform", _esc(self.platform) if self.platform else "not set"),
             ("max_oligo_length", self.max_oligo_length if self.max_oligo_length is not None else "not set"),
+            ("gc_bounds", f"{self.gc_bounds[0]:.0%} to {self.gc_bounds[1]:.0%} "
+                          "<span style='opacity:.6'>(of the ordered molecule)</span>"
+                          if self.gc_bounds else "not set"),
             ("seed", self.seed),
         ]
         trs = "".join(

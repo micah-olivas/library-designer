@@ -817,11 +817,32 @@ def test_the_codon_map_of_the_reference_alone_has_one_cell_per_position(mbo038):
     assert np.nanmax(data) == 1
 
 
-def test_export_all_writes_both_qc_plots_in_a_qc_subdir(mbo038, tmp_path):
+def test_export_all_writes_the_qc_plots_in_a_qc_subdir(mbo038, tmp_path):
     mbo038.export_all(tmp_path / "out", plots=True)
     qc = mbo038.output_dir / "qc"
-    assert sorted(p.name for p in qc.glob("*.png")) == ["codon_matrix.png", "codon_usage.png"]
-    assert not list(mbo038.output_dir.glob("*.png"))   # nothing left loose in the run dir
+    assert sorted(p.name for p in qc.iterdir()) == [
+        "codon_matrix.pdf", "codon_usage.pdf", "gc_distribution.pdf",
+    ]
+    assert not list(mbo038.output_dir.glob("*.p*g"))   # nothing left loose in the run dir
+    for plot in qc.iterdir():
+        assert plot.read_bytes()[:4] == b"%PDF"
+
+
+def test_exported_plots_name_their_font_in_the_pdf(mbo038, tmp_path):
+    """Text goes out as embedded TrueType, not Type 3 outlines, so a label stays selectable
+    and the face is named in the file. Skipped where the first choice is not installed, since
+    the stack then legitimately falls back."""
+    from matplotlib import font_manager
+
+    from library_designer.viz import FONT_STACK
+
+    wanted = FONT_STACK[0]
+    if wanted not in {f.name for f in font_manager.fontManager.ttflist}:
+        pytest.skip(f"{wanted} is not installed on this machine")
+
+    mbo038.export_all(tmp_path / "out")
+    for plot in (mbo038.output_dir / "qc").iterdir():
+        assert wanted.encode() in plot.read_bytes(), f"{plot.name} is not typeset in {wanted}"
 
 
 def test_export_all_skips_the_qc_subdir_when_plots_are_off(mbo038, tmp_path):
@@ -830,7 +851,7 @@ def test_export_all_skips_the_qc_subdir_when_plots_are_off(mbo038, tmp_path):
 
 
 def test_dpi_is_settable_on_every_plot_and_reaches_the_file(mbo038, tmp_path):
-    """One number governs a figure inline and on disk. The default is raised above
+    """One number governs a figure inline and in a raster file. The default is raised above
     matplotlib's 100, since the codon map draws cells a couple of pixels wide."""
     import matplotlib
     matplotlib.use("Agg")
@@ -842,7 +863,7 @@ def test_dpi_is_settable_on_every_plot_and_reaches_the_file(mbo038, tmp_path):
         assert make().dpi == DEFAULT_DPI
         assert make(dpi=400).dpi == 400
 
-    # A saved file inherits the figure's dpi, so the same call sharpens both.
+    # A saved image inherits the figure's dpi, so the same call sharpens both.
     from PIL import Image
 
     mbo038.to_qc_plots(tmp_path / "low.png", dpi=100)
@@ -850,11 +871,10 @@ def test_dpi_is_settable_on_every_plot_and_reaches_the_file(mbo038, tmp_path):
     low, high = Image.open(tmp_path / "low.png"), Image.open(tmp_path / "high.png")
     assert high.width > low.width * 2.5
 
-    mbo038.export_all(tmp_path / "out", dpi=300)
-    matrix = Image.open(mbo038.output_dir / "qc" / "codon_matrix.png")
-    mbo038.export_all(tmp_path / "out2", dpi=100)
-    smaller = Image.open(mbo038.output_dir / "qc" / "codon_matrix.png")
-    assert matrix.width > smaller.width * 2.5
+    # The exported QC plots are vector, so dpi cannot blur them and the file stands either way.
+    for value in (100, 300):
+        mbo038.export_all(tmp_path / f"out{value}", dpi=value)
+        assert (mbo038.output_dir / "qc" / "codon_matrix.pdf").read_bytes()[:4] == b"%PDF"
 
 
 # --- which terminus the truncation comes off ----------------------------------
@@ -980,8 +1000,9 @@ def test_compare_reference_still_reports_a_genuinely_different_protein():
 
 
 def test_the_plots_number_codons_the_way_variant_names_do():
-    """A truncated library's plots have to agree with its labels. The x axis is full-protein
-    numbering, so an N-terminal truncation starts it at the first designed residue."""
+    """A truncated library's plots have to agree with its labels. The codon map spans the whole
+    protein in full-protein numbering, with the truncated residues greyed, and the codon-usage
+    trace starts at the first designed residue."""
     import matplotlib
     matplotlib.use("Agg")
 
@@ -996,13 +1017,27 @@ def test_the_plots_number_codons_the_way_variant_names_do():
         lo, hi = ax.get_xlim()
         return round(lo + 0.5), round(hi - 0.5), ax.get_xlabel()
 
+    # The protein is 9 aa, so every map covers 1..9 whichever end the truncation came off.
     assert x_span(plain) == (1, 9, "Codon position (CDS)")
     lo, hi, label = x_span(n)
-    assert (lo, hi) == (3, 9) and "starts at 3" in label          # residues 3..9
-    assert x_span(c) == (1, 7, "Codon position (CDS)")             # numbering unshifted
+    assert (lo, hi) == (1, 9) and "starts at 3" in label
+    assert x_span(c) == (1, 9, "Codon position (CDS)")             # numbering unshifted
 
-    # And the first plotted position is the first variant's own position.
-    assert lo == min(int(p) for p in n.df["position"].dropna()) - 1  # residue 3 is already Ala
+    # The data itself still covers the designed window only; the rest is a grey span.
+    def designed_and_grey(lib):
+        (ax,) = [a for a in lib.plot_codon_matrix().axes if a.get_images()]
+        (im,) = ax.get_images()
+        x0, x1, *_ = im.get_extent()
+        grey = [(round(p.get_x() + 0.5), round(p.get_x() + p.get_width() - 0.5))
+                for p in ax.patches]
+        return (round(x0 + 0.5), round(x1 - 0.5)), grey
+
+    assert designed_and_grey(plain) == ((1, 9), [])                # nothing truncated
+    assert designed_and_grey(n) == ((3, 9), [(1, 2)])              # residues 1-2 dropped
+    assert designed_and_grey(c) == ((1, 7), [(8, 9)])              # residues 8-9 dropped
+
+    # And the first designed position is the first variant's own position.
+    assert 3 == min(int(p) for p in n.df["position"].dropna()) - 1   # residue 3 is already Ala
 
 
 def test_the_usage_overlay_is_trimmed_to_the_designed_region():
@@ -1028,7 +1063,8 @@ def test_the_usage_overlay_is_trimmed_to_the_designed_region():
 
 def test_the_codon_map_writes_the_wt_residue_over_each_column(mbo038):
     """The WT amino acid above each position, so a codon row can be read against what the
-    wild type has there."""
+    wild type has there. The truncated residues are lettered too, in grey, since their columns
+    are drawn."""
     import matplotlib
     matplotlib.use("Agg")
     from dnachisel import translate
@@ -1036,12 +1072,17 @@ def test_the_codon_map_writes_the_wt_residue_over_each_column(mbo038):
     fig = mbo038.plot_codon_matrix()
     (ax,) = [a for a in fig.axes if a.get_images()]
     (track,) = ax.child_axes          # the secondary x-axis carrying the residues
-    letters = [t.get_text() for t in track.get_xticklabels()]
-    assert "".join(letters) == translate(mbo038.reference)
+    labels = track.get_xticklabels()
+    assert "".join(t.get_text() for t in labels) == mbo038.spec.protein_sequence
 
-    # Positioned on the same full-protein numbering as the map itself.
-    first = mbo038.spec.numbering_offset + 1
-    assert [round(t) for t in track.get_xticks()][:3] == [first, first + 1, first + 2]
+    # The designed stretch comes from the reference the map counts, and is the part left in ink.
+    inked = "".join(t.get_text() for t in labels if t.get_color() != "0.45")
+    assert inked == translate(mbo038.reference)
+    greyed = "".join(t.get_text() for t in labels if t.get_color() == "0.45")
+    assert greyed == mbo038.spec.protein_sequence[:mbo038.spec.truncation]
+
+    # Positioned on the same full-protein numbering as the map itself, from residue 1.
+    assert [round(t) for t in track.get_xticks()][:3] == [1, 2, 3]
     # And the title still clears it.
     assert ax.get_title(loc="left").startswith("Codon map,")
 
@@ -1062,3 +1103,328 @@ def test_the_wt_track_is_dropped_when_the_columns_are_too_narrow_to_letter():
     (ax,) = [a for a in fig.axes if a.get_images()]
     assert not ax.child_axes                                         # no track
     assert ax.get_title(loc="left").startswith("Codon map,")
+
+
+# --- masking positions out of the scan ----------------------------------------
+#
+# Masking and truncating are different mechanisms. A masked residue is still encoded and still
+# synthesized on every oligo; it just gets no variants. A truncated one leaves the designed
+# region altogether and, with a vector, is supplied by the plasmid.
+
+def test_masked_positions_get_no_variants_but_stay_in_the_construct():
+    from dnachisel import translate
+
+    plain = SubstitutionScan(_trunc_spec()).generate().codon_optimize()
+    masked = SubstitutionScan(_trunc_spec(mask_positions=[1, 2])).generate().codon_optimize()
+
+    # Same sequence, fewer members.
+    assert masked.reference == plain.reference == _TRUNC_CDS
+    assert translate(masked.reference) == _TRUNC_PROTEIN
+    assert len(masked.df) < len(plain.df)
+
+    pos = {int(p) for p in masked.df["position"].dropna()}
+    assert 1 not in pos and 2 not in pos
+    assert pos == {int(p) for p in plain.df["position"].dropna()} - {1, 2}
+    # And no variant name refers to a masked position.
+    assert not [n for n in masked.df["name"] if str(n)[1:-1] in ("1", "2")]
+
+
+def test_masking_and_truncating_differ_in_what_is_encoded():
+    """The distinction that matters: masking keeps the residues in the reference, truncating
+    takes them out of it."""
+    mask = SubstitutionScan(_trunc_spec(mask_positions=[1, 2])).generate().codon_optimize()
+    trunc = SubstitutionScan(_trunc_spec(truncation=2)).generate().codon_optimize()
+
+    assert len(mask.reference) == len(_TRUNC_CDS)
+    assert len(trunc.reference) == len(_TRUNC_CDS) - 6
+    # Both leave the same positions unscanned, so the member counts agree.
+    assert len(mask.df) == len(trunc.df)
+    assert ({int(p) for p in mask.df["position"].dropna()}
+            == {int(p) for p in trunc.df["position"].dropna()})
+
+
+def test_mask_positions_are_normalized_and_range_checked():
+    spec = _trunc_spec(mask_positions=[3, 1, 3])
+    assert spec.mask_positions == [1, 3] and spec.masked == {1, 3}      # sorted, deduped
+
+    for bad in ([0], [len(_TRUNC_PROTEIN) + 1], [-2]):
+        with pytest.raises(ValueError, match="fall outside protein_sequence"):
+            _trunc_spec(mask_positions=bad).masked
+
+
+def test_masking_every_position_is_refused():
+    """Otherwise the library is nothing but the wild-type control, which is not a library."""
+    with pytest.raises(ValueError, match="leaves no position to scan"):
+        SubstitutionScan(
+            _trunc_spec(mask_positions=list(range(1, len(_TRUNC_PROTEIN) + 1)))
+        ).generate()
+
+
+def test_masking_is_recorded_and_shown():
+    spec = _trunc_spec(mask_positions=[1, 2])
+    assert "masked:" in repr(spec) and "1, 2" in repr(spec)
+    assert "encoded, not scanned" in repr(spec)
+    assert _trunc_spec().mask_positions == [] and "masked:" not in repr(_trunc_spec())
+
+    lib = SubstitutionScan(spec).generate().codon_optimize()
+    assert lib.design_specs["spec"]["mask_positions"] == [1, 2]
+
+
+def test_masking_uses_full_protein_numbering_even_when_truncated():
+    """Both are full-protein numbers, so they compose without the caller converting."""
+    lib = SubstitutionScan(
+        _trunc_spec(truncation=2, mask_positions=[3, 4])).generate().codon_optimize()
+    pos = {int(p) for p in lib.df["position"].dropna()}
+    assert pos == {5, 6, 7, 8, 9}          # 1-2 truncated away, 3-4 masked
+
+
+def test_the_spec_table_reports_the_mask():
+    """The HTML table is the notebook's review surface, so it has to say what is masked, not
+    only the text repr."""
+    import re
+
+    spec = _trunc_spec(mask_positions=[1, 2])
+    html = spec._repr_html_()
+    (row,) = re.findall(r">masked</th><td[^>]*>(.*?)</td>", html)
+    text = re.sub("<[^>]+>", "", row)
+    # The residue each masked position holds, not just the number, so the row says what is
+    # being left out.
+    assert text.startswith(f"{_TRUNC_PROTEIN[0]}1 {_TRUNC_PROTEIN[1]}2")
+    assert "encoded, not scanned" in text
+
+    # Absent entirely when nothing is masked, so an ordinary spec's table stays short.
+    assert ">masked</th>" not in _trunc_spec()._repr_html_()
+
+
+def test_a_long_mask_is_elided_in_the_table():
+    spec = LibrarySpec(name="m", protein_sequence="MKAILVDEQTRWYFGH",
+                       substitutions=["A"], mask_positions=list(range(1, 15)))
+    import re
+
+    html = spec._repr_html_()
+    (row,) = re.findall(r">masked</th><td[^>]*>(.*?)</td>", html)
+    assert row.count("<code>") == 12         # capped, so a long mask cannot flood the table
+    assert "and 2 more" in row
+
+
+# --- the GC window on the ordered molecule ------------------------------------
+
+def test_gc_bounds_accepts_fractions_or_percentages():
+    for given in ((0.35, 0.65), (35, 65), [35, 65]):
+        assert _trunc_spec(gc_bounds=given).gc_bounds == (0.35, 0.65)
+    assert _trunc_spec().gc_bounds is None                    # off by default
+
+    for bad in ((0.65, 0.35), (-0.1, 0.5), (0.5, 2.0), (0.5, 0.5)):
+        with pytest.raises(ValueError, match="gc_bounds must be"):
+            _trunc_spec(gc_bounds=bad)
+
+
+def test_the_gc_gate_judges_the_ordered_molecule_not_the_coding_region(mbo038):
+    """A vendor's GC window refers to what it receives, so the gate is on the whole molecule.
+    With adaptors on, that differs from the variable region's own GC."""
+    from library_designer.checks.report import gc_fraction, ordered_molecules
+
+    ordered = ordered_molecules(mbo038)
+    assert set(ordered) == set(mbo038.df["name"].astype(str))
+    row = mbo038.df.iloc[0]
+    assert ordered[str(row["name"])] == assemble(
+        row["adaptor_5"], row["variable_dna"], row["adaptor_3"])
+    assert gc_fraction(ordered[str(row["name"])]) != gc_fraction(row["variable_dna"])
+
+
+def test_the_gc_gate_is_off_until_bounds_are_set():
+    """No vendor registry ships with the package, so the window is the caller's to state."""
+    spec = LibrarySpec.from_toml(MBO038_TOML)
+    assert spec.gc_bounds is None
+    lib = SubstitutionScan(spec).generate().codon_optimize()
+    assert lib.check().gc_out_of_range == []
+
+    from dataclasses import replace
+    tight = SubstitutionScan(replace(spec, gc_bounds=(0.50, 0.52))).generate().codon_optimize()
+    rep = tight.check()
+    assert rep.gc_out_of_range and not rep.passed
+    assert "GC window" in rep.text() and "outside gc_bounds" in rep.text()
+    assert rep.issues["gc_out_of_range"] == rep.gc_out_of_range
+
+
+def test_every_member_inside_the_window_passes():
+    from dataclasses import replace
+
+    spec = replace(LibrarySpec.from_toml(MBO038_TOML), gc_bounds=(0.0, 1.0))
+    lib = SubstitutionScan(spec).generate().codon_optimize()
+    rep = lib.check()
+    assert rep.gc_out_of_range == [] and rep.passed
+
+
+def test_ordered_gc_is_written_beside_the_variable_region_gc(mbo038, tmp_path):
+    import pandas as pd
+
+    from library_designer.checks.report import gc_fraction, ordered_molecules
+
+    mbo038.to_full_csv(tmp_path / "full.csv")
+    out = pd.read_csv(tmp_path / "full.csv")
+    assert {"gc_content", "ordered_gc"} <= set(out.columns)
+
+    ordered = ordered_molecules(mbo038)
+    for name, got in zip(out["name"], out["ordered_gc"]):
+        assert got == pytest.approx(round(gc_fraction(ordered[str(name)]), 3))
+    # The two columns are different numbers, so neither can be mistaken for the other.
+    assert not out["gc_content"].equals(out["ordered_gc"])
+
+
+def test_a_tiled_library_is_gated_on_its_oligo(tmp_path):
+    """A tiled pool orders the assembled oligo, primers and sites included, so that is the
+    molecule the window applies to rather than the bare CDS."""
+    from dataclasses import replace
+
+    from library_designer.checks.report import ordered_molecules
+
+    spec = replace(LibrarySpec.from_toml(REPO / "examples" / "gck_tiled.toml"),
+                   gc_bounds=(0.35, 0.65))
+    lib = SubstitutionScan(spec).generate().codon_optimize().drop_failed().tile()
+    ordered = ordered_molecules(lib)
+    placed = {str(n): o for n, o in zip(lib.df["name"], lib.df["oligo"]) if isinstance(o, str)}
+    assert ordered == placed                      # the oligo, not adaptor+CDS+adaptor
+    assert "WT" not in ordered                    # the global WT row rides on no oligo
+
+
+# --- the GC distribution figure -----------------------------------------------
+
+def test_gc_table_reports_both_gc_numbers_per_member(mbo038):
+    from library_designer.checks.report import gc_fraction, ordered_molecules
+
+    t = mbo038.gc_table()
+    assert list(t.columns) == ["name", "sublibrary", "ordered_gc", "variable_gc", "in_bounds"]
+    assert len(t) == len(ordered_molecules(mbo038))
+    row = t[t["name"] == "WT"].iloc[0]
+    assert row["sublibrary"] == "WT"                     # the control is its own bucket
+    assert row["ordered_gc"] == pytest.approx(
+        gc_fraction(ordered_molecules(mbo038)["WT"]))
+    # The ordered molecule carries the adaptors, so it is not the coding region's number.
+    assert (t["ordered_gc"] != t["variable_gc"]).all()
+    assert t["in_bounds"].isna().all()                   # no bounds set on this spec
+
+
+def test_in_bounds_follows_gc_bounds():
+    from dataclasses import replace
+
+    spec = replace(LibrarySpec.from_toml(MBO038_TOML), gc_bounds=(0.50, 0.52))
+    lib = SubstitutionScan(spec).generate().codon_optimize()
+    t = lib.gc_table()
+    assert set(t["in_bounds"]) <= {True, False}
+    outside = set(t[~t["in_bounds"].astype(bool)]["name"])
+    assert outside == set(lib.check().gc_out_of_range)   # the table and the gate agree
+
+
+def test_the_gc_figure_has_two_panels_and_marks_the_window():
+    import matplotlib
+    matplotlib.use("Agg")
+    from dataclasses import replace
+
+    spec = replace(LibrarySpec.from_toml(MBO038_TOML), gc_bounds=(0.35, 0.65))
+    lib = SubstitutionScan(spec).generate().codon_optimize()
+    fig = lib.plot_gc_distribution()
+    detail, window = fig.axes
+    # Titles are set loc="left", and get_title() reads the centre one.
+    assert "own scale" in detail.get_title(loc="left")
+    assert "35% to 65%" in window.get_title(loc="left")
+
+    # The right panel shows the whole window; the left one does not have to.
+    lo, hi = window.get_xlim()
+    assert lo <= 0.35 and hi >= 0.65
+    assert (detail.get_xlim()[1] - detail.get_xlim()[0]) < (hi - lo)
+    # Both panels mark the bounds, so the margin is readable on either.
+    for ax in (detail, window):
+        assert [round(ln.get_xdata()[0], 2) for ln in ax.get_lines()] == [0.35, 0.65]
+
+    # Stacked by sublibrary, plus the coding-region outline.
+    labels = [t.get_text() for t in window.get_legend().get_texts()]
+    assert "coding region only" in labels
+    assert sum(lab.startswith("to ") for lab in labels) == lib.df["mut_residue"].nunique()
+    assert "WT control" in labels
+
+
+def test_the_window_panel_says_so_when_no_bounds_are_set(mbo038):
+    import matplotlib
+    matplotlib.use("Agg")
+
+    fig = mbo038.plot_gc_distribution()
+    _detail, window = fig.axes
+    assert window.get_title(loc="left") == "gc_bounds not set"
+    assert not window.get_lines()                        # nothing to mark
+
+    off = mbo038.plot_gc_distribution(show_variable_region=False)
+    labels = [t.get_text() for t in off.axes[1].get_legend().get_texts()]
+    assert "coding region only" not in labels
+
+
+# --- homopolymer runs ---------------------------------------------------------
+#
+# Both prevented and checked. The optimizer avoids long runs in the coding region, the stamp
+# will not introduce one, and QC screens the finished molecule, which is where a run spelled
+# across an adaptor junction shows up: the optimizer never sees the flanks.
+
+_RUN_PROTEIN = "MKKKKKKKKKAILVDEQTRW"      # lysine runs, which AAA/AAG can spell as a long A run
+
+
+def _run_lib(limit=None, **kw):
+    from library_designer.checks.report import longest_run  # noqa: F401
+
+    if limit:
+        kw["max_homopolymer"] = limit
+    kw.setdefault("adaptor_5", "gcgtcggtctccaagc")
+    kw.setdefault("adaptor_3", "ggtgagagaccgacgc")
+    spec = LibrarySpec(name="h", protein_sequence=_RUN_PROTEIN, substitutions=["A"],
+                       seed=3, **kw)
+    return SubstitutionScan(spec).generate().codon_optimize()
+
+
+def test_the_limit_is_a_run_length_and_yields_one_pattern_per_base():
+    spec = LibrarySpec(name="h", protein_sequence="MKV", max_homopolymer=7)
+    assert spec.homopolymer_patterns == ["A{8,}", "C{8,}", "G{8,}", "T{8,}"]
+    assert LibrarySpec(name="h", protein_sequence="MKV").homopolymer_patterns == []
+
+    with pytest.raises(ValueError, match="max_homopolymer must be at least 1"):
+        LibrarySpec(name="h", protein_sequence="MKV", max_homopolymer=0)
+
+
+def test_the_optimizer_breaks_up_a_run_that_the_protein_invites():
+    """A lysine stretch reverse-translates to a long A run unless something stops it."""
+    from library_designer.checks.report import longest_run
+
+    assert longest_run(_run_lib().reference) > 7          # unconstrained, the run survives
+    assert longest_run(_run_lib(limit=7).reference) <= 7  # constrained, it is broken up
+
+
+def test_a_stamped_codon_cannot_introduce_a_run():
+    from library_designer.checks.report import longest_run, ordered_molecules
+
+    lib = _run_lib(limit=7)
+    assert all(longest_run(dna) <= 7 for dna in lib.df["variable_dna"] if isinstance(dna, str))
+    assert lib.check().homopolymer_hits == []
+    assert max(longest_run(s) for s in ordered_molecules(lib).values()) <= 7
+
+
+def test_a_run_spelled_across_the_adaptor_junction_is_caught():
+    """The screen QC adds on top of the constraint. The optimizer only sees the coding region,
+    so a run finished off by the adaptor is invisible to it."""
+    from library_designer.checks.report import longest_run, ordered_molecules
+
+    lib = _run_lib(limit=7, adaptor_5="ggtctccAAAAAAA")   # 7 A's meeting the CDS
+    assert longest_run(lib.reference) <= 7                # the coding region is clean
+    rep = lib.check()
+    assert rep.homopolymer_hits and not rep.passed
+    assert "with a run over max_homopolymer" in rep.text()
+
+    # Every member whose first codon still starts with A crosses the limit; the one mutated to
+    # GCG does not, which is why this is judged per member and not per adaptor.
+    ordered = ordered_molecules(lib)
+    for name in lib.df["name"].astype(str):
+        crossed = longest_run(ordered[name]) > 7
+        assert (name in rep.homopolymer_hits) is crossed
+    assert set(lib.df["name"]) - set(rep.homopolymer_hits) == {"M1A"}
+
+
+def test_the_gate_is_off_until_a_limit_is_set(mbo038):
+    assert mbo038.spec.max_homopolymer is None
+    assert mbo038.check().homopolymer_hits == []

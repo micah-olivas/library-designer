@@ -57,6 +57,7 @@ class LibrarySummary:
     qc: CheckReport | None
     starting_vector: str | None = None  # the destination plasmid, when the spec names one
     tiles: dict | None = None           # tiled layout: tile count, oligo lengths, primer set
+    gc: dict | None = None              # GC of the ordered molecule: min/median/max + bounds
 
     @property
     def ok(self) -> bool:
@@ -102,6 +103,22 @@ class LibrarySummary:
         )
         return "adaptors", f"{pair}   construct {length}" if length else pair
 
+    def _gc_row(self) -> tuple[str, str] | None:
+        """The GC spread of the ordered molecule, with the window when one is set. None before
+        optimization, when there is nothing to measure."""
+        if not self.gc:
+            return None
+        g = self.gc
+        value = f"{g['min']:.3f} to {g['max']:.3f}, median {g['median']:.3f}"
+        if g["bounds"]:
+            lo, hi = g["bounds"]
+            # The closest either end comes to its limit, which is the number worth knowing when
+            # the window is wide and the pool is tight. QC names anything actually outside.
+            slack = min(g["min"] - lo, hi - g["max"])
+            value += (f"   window {lo:.0%}-{hi:.0%}, "
+                      + (f"{slack * 100:.1f} points to spare" if slack >= 0 else "exceeded"))
+        return "gc", value
+
     def __str__(self) -> str:
         rows: list[tuple[str, str]] = []
         if self.platform:
@@ -112,6 +129,8 @@ class LibrarySummary:
                          "  ".join(f"{k}={v}" for k, v in self.per_sublibrary.items())))
         if (size := self._size_row()) is not None:
             rows.append(size)
+        if (gc_row := self._gc_row()) is not None:
+            rows.append(gc_row)
         if self.starting_vector:
             rows.append(("vector", Path(self.starting_vector).name))
         rows.append(("optimization", optimization_line(self.optimization)))
@@ -175,6 +194,22 @@ def summarize(library) -> LibrarySummary:
             "oligo_len_max": int(oligo_len.max()) if len(oligo_len) else None,
         }
 
+    # GC of the molecule that is ordered, which is the number a vendor's window refers to.
+    # The spread is what the summary adds: QC already names the members outside the window, so
+    # this line says how much room there is rather than repeating the verdict.
+    gc = None
+    if optimized and n_opt:
+        from .checks.report import gc_table
+
+        table = gc_table(library)
+        if not table.empty:
+            gc = {
+                "min": float(table["ordered_gc"].min()),
+                "median": float(table["ordered_gc"].median()),
+                "max": float(table["ordered_gc"].max()),
+                "bounds": spec.gc_bounds,
+            }
+
     return LibrarySummary(
         name=spec.name,
         n_variants=len(df),
@@ -189,4 +224,5 @@ def summarize(library) -> LibrarySummary:
             vec.path if (vec := spec.resolve_vector(getattr(library, "tiled_params", None))) else None
         ),
         tiles=tiles,
+        gc=gc,
     )

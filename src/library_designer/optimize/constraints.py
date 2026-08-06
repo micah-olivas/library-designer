@@ -9,14 +9,17 @@ from ..spec import LibrarySpec
 
 
 def sequence_rules(spec: LibrarySpec) -> list:
-    """Location-independent constraints every optimized CDS must satisfy:
-    enforce translation, avoid forbidden motifs, avoid restriction sites.
+    """Location-independent constraints every optimized CDS must satisfy: enforce translation,
+    avoid forbidden motifs, avoid restriction sites, and keep single-base runs within
+    ``spec.max_homopolymer`` when one is set.
 
     ``AvoidPattern("<enzyme>_site")`` is enzyme-aware and checks both strands.
     """
     rules: list = [EnforceTranslation()]
     rules += [AvoidPattern(pattern) for pattern in spec.avoid_patterns]
     rules += [AvoidPattern(f"{enzyme}_site") for enzyme in spec.avoid_enzymes]
+    # One per base, so a run longer than the limit cannot survive optimization.
+    rules += [AvoidPattern(pattern) for pattern in spec.homopolymer_patterns]
     return rules
 
 

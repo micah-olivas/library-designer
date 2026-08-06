@@ -53,6 +53,10 @@ def _apply_font(fig):
 # Okabe-Ito colourblind-safe categorical palette (for sublibraries).
 _PALETTE = ["#E69F00", "#56B4E9", "#009E73", "#CC79A7", "#0072B2", "#D55E00", "#F0E442", "#999999"]
 
+# A position the truncation left out of the design, on the codon map. Neutral, so it does not
+# read as a value on the single-hue scale the cells use.
+_TRUNCATED = "#E6E9ED"
+
 
 def _new_figure(**kwargs):
     """A Figure created through pyplot and immediately closed.
@@ -361,10 +365,15 @@ def codon_matrix_figure(library, log: bool = True, reference_only: bool = False,
     colour logarithmically so both are visible at once; pass ``log=False`` for a linear scale,
     which suits a ``SequenceSet`` whose members are independent and spread more evenly.
 
+    Residues the spec's ``truncation`` dropped are drawn as greyed columns either side of the
+    designed window, named in the legend, so the map covers the whole protein its numbering
+    refers to and what was left out can be seen rather than inferred from where the data
+    starts. They hold no codon, since the library encodes nothing there.
+
     ``wt_track`` writes the wild-type residue above each position, so a column can be read
-    against what the wild type has there. It is dropped when the positions are too narrow to
-    letter, which a long CDS will be, and when there is no shared reference to take the
-    residues from.
+    against what the wild type has there. Truncated positions are lettered too, in grey to
+    match their column. The track is dropped when the positions are too narrow to letter,
+    which a long CDS will be, and when there is no shared reference to take the residues from.
     """
     import matplotlib.pyplot as plt
     from matplotlib.colors import LinearSegmentedColormap, LogNorm
@@ -413,8 +422,21 @@ def codon_matrix_figure(library, log: bool = True, reference_only: bool = False,
         else:
             groups.append((aa, i, i + 1))
 
+    # Residues the truncation dropped are drawn too, as greyed columns either side of the
+    # designed window, so the map covers the protein the numbering refers to and a reader can
+    # see what was left out rather than infer it from where the axis starts. Taken from the
+    # protein only when it is long enough to cover the window, since the flank letters come
+    # from it and a spec without one has nothing to letter them with.
+    first, xlabel = _codon_axis(spec, n_codons)
+    protein = spec.protein_sequence or ""
+    head = first - 1                                   # residues cut off the N terminus
+    tail = len(protein) - head - n_codons              # and off the C terminus
+    if tail < 0 or len(protein) < head + n_codons:
+        head = tail = 0
+    n_columns = head + n_codons + tail
+
     height = max(3.2, 0.16 * len(rows) + 1.8)
-    width = max(7.0, min(22.0, 0.055 * n_codons + 3.8))
+    width = max(7.0, min(22.0, 0.055 * n_columns + 3.8))
     fig = _new_figure(figsize=(width, height), dpi=dpi, layout="constrained")
     ax = fig.subplots()
 
@@ -423,7 +445,6 @@ def codon_matrix_figure(library, log: bool = True, reference_only: bool = False,
     # is one member, and a background tint at that weight is indistinguishable from it, so
     # structure and value would read as the same thing. Offsets are in points rather than axes
     # fractions, so the letters sit the same distance out whatever the figure's width.
-    first, xlabel = _codon_axis(spec, n_codons)
     on_axis = ax.get_yaxis_transform()
     # Each rule runs a little past the left spine so the division reads across the residue
     # letter and the codon labels, not just the map. The overhang is set in points and
@@ -436,7 +457,8 @@ def codon_matrix_figure(library, log: bool = True, reference_only: bool = False,
         if k:
             ax.axhline(lo - 0.5, xmin=-overhang, color="black", linewidth=0.8, zorder=4,
                        clip_on=False)
-    ax.set_ylabel("Amino acid and codon", labelpad=22)
+    # No y-axis label: the residue letters already sit out in that margin, and a rotated label
+    # beyond them lands on top of the codon ticks on a figure of any ordinary width.
 
     biggest = max((v for row in counts for v in row), default=1)
     masked = [[(v if v else float("nan")) for v in row] for row in counts]
@@ -455,11 +477,18 @@ def codon_matrix_figure(library, log: bool = True, reference_only: bool = False,
                      extent=(first - 0.5, first + n_codons - 0.5,
                              len(rows) - 0.5, -0.5))
 
+    # The truncated flanks, outside the data the imshow covers. Drawn under the group rules so
+    # a boundary still reads across them.
+    x_lo, x_hi = first - 0.5 - head, first + n_codons - 0.5 + tail
+    for a, b in ((x_lo, first - 0.5), (first + n_codons - 0.5, x_hi)):
+        if b > a:
+            ax.axvspan(a, b, facecolor=_TRUNCATED, edgecolor="none", zorder=1.5)
+
     ax.set_yticks(range(len(rows)))
     ax.set_yticklabels([codon for _aa, codon in rows], fontsize=6)
     ax.tick_params(axis="y", length=0, pad=2)
     ax.set_xlabel(xlabel)
-    ax.set_xlim(first - 0.5, first + n_codons - 0.5)
+    ax.set_xlim(x_lo, x_hi)
     ax.set_ylim(len(rows) - 0.5, -0.5)
 
     # Both keys go in a footer under the map. The figure is tall and narrow, so a colourbar
@@ -469,13 +498,21 @@ def codon_matrix_figure(library, log: bool = True, reference_only: bool = False,
     # that position. Skipped rather than overlapped when a column is narrower than a letter:
     # the plot area is roughly the figure less its margins, and below about 4 points per
     # column the letters collide into a smear.
-    per_column = (width - 1.7) * 72 / max(n_codons, 1)
+    per_column = (width - 1.7) * 72 / max(n_columns, 1)
     if wt_track and library.reference is not None and per_column >= 4.0:
-        residues = translate(library.reference)[:n_codons]
+        # The designed letters come from the reference, which is what the map counts; the
+        # flanking ones from the protein, which is all a truncated residue has. They are greyed
+        # to match their column.
+        residues = protein[:head] + translate(library.reference)[:n_codons] \
+            + protein[head + n_codons:]
+        columns = range(first - head, first + n_codons + tail)
         top = ax.secondary_xaxis("top")
-        top.set_xticks(range(first, first + n_codons))
+        top.set_xticks(list(columns))
         top.set_xticklabels(list(residues), fontsize=min(6.5, per_column * 0.9))
         top.tick_params(length=0, pad=1.5)
+        for column, label in zip(columns, top.get_xticklabels()):
+            if not first <= column < first + n_codons:
+                label.set_color("0.45")
         for side in top.spines.values():
             side.set_visible(False)
         drew_track = True
@@ -498,10 +535,89 @@ def codon_matrix_figure(library, log: bool = True, reference_only: bool = False,
     bar.ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _pos: f"{v:g}"))
     bar.ax.xaxis.set_minor_formatter(NullFormatter())
 
-    # An empty cell is the one fill the colourbar does not explain. Sat beside the bar rather
-    # than under it, so the footer is one line.
-    fig.legend(handles=[Patch(facecolor="white", edgecolor="0.6",
-                              label="no member carries this codon here")],
-               loc="center left", bbox_to_anchor=(1.06, 0.5), bbox_transform=bar.ax.transAxes,
-               frameon=False, fontsize=7, handlelength=1.4, borderaxespad=0)
+    # The fills the colourbar does not explain: an empty cell, and a column the truncation left
+    # out of the design. Both sit beside the bar rather than under it, so the footer stays the
+    # height of the bar.
+    keys = [Patch(facecolor="white", edgecolor="0.6",
+                  label="no member carries this codon here")]
+    if head or tail:
+        keys.append(Patch(facecolor=_TRUNCATED, edgecolor="0.6",
+                          label="truncated, not part of the design"))
+    fig.legend(handles=keys, loc="center left", bbox_to_anchor=(1.06, 0.5),
+               bbox_transform=bar.ax.transAxes, frameon=False, fontsize=7, handlelength=1.4,
+               labelspacing=0.5, borderaxespad=0)
+    return _apply_font(fig)
+
+
+def gc_distribution_figure(library, bins: int = 24, show_variable_region: bool = True,
+                           dpi: int = DEFAULT_DPI):
+    """Return a matplotlib Figure of the pool's GC distribution, in two panels.
+
+    The left panel is the distribution at its own scale, where a bimodal pool or a stray
+    outlier shows up. The right panel puts the whole ``spec.gc_bounds`` window in view, so the
+    margin to the vendor's limits is read off the plot rather than inferred. A pool is usually
+    tight enough that one panel cannot do both.
+
+    GC is measured on the molecule that is ordered, the assembled oligo for a tiled library and
+    the construct with its adaptors otherwise, since that is what ``gc_bounds`` gates and what
+    a vendor's window refers to. Bars are stacked by sublibrary, which separates the scans:
+    swapping a codon for ``TAG`` and for ``GCG`` move GC in opposite directions.
+    ``show_variable_region`` overlays the coding region alone, which the gate ignores and which
+    sits lower whenever the flanks are GC-rich.
+    """
+    import numpy as np
+
+    from .checks.report import gc_table
+
+    table = gc_table(library)
+    if table.empty:
+        raise ValueError(
+            "No ordered molecules to measure. Optimize the library first, and for a tiled "
+            "library call tile() so each member has an oligo."
+        )
+    spec = library.spec
+    bounds = spec.gc_bounds
+
+    # Constrained layout, since the legend sits outside the right panel and tight_layout
+    # cannot account for it.
+    fig = _new_figure(figsize=(11, 3.6), dpi=dpi, layout="constrained")
+    detail, window = fig.subplots(1, 2, gridspec_kw={"wspace": 0.22})
+    groups = [g for _, g in table.groupby("sublibrary", sort=True)]
+    coding = table["variable_gc"].dropna().astype(float)
+
+    for ax, wide in ((detail, False), (window, True)):
+        if bounds:
+            ax.axvspan(*bounds, color="#4C78A8", alpha=0.07, zorder=0)
+            for edge in bounds:
+                ax.axvline(edge, color="#4C78A8", lw=1, ls="--", zorder=1)
+
+        # The detail panel spans both series, or the coding-region outline is drawn partly
+        # outside the axes and reads as though bars were missing.
+        series = [table["ordered_gc"]] + ([coding] if show_variable_region and len(coding)
+                                          else [])
+        seen = (min(x.min() for x in series), max(x.max() for x in series))
+        lo, hi = (min(bounds[0], seen[0]), max(bounds[1], seen[1])) if (wide and bounds) else seen
+        pad = max((hi - lo) * 0.06, 0.002)
+        edges = np.linspace(lo - pad, hi + pad, bins + 1)
+
+        ax.hist([g["ordered_gc"] for g in groups], bins=edges, stacked=True,
+                label=[("WT control" if g["sublibrary"].iloc[0] == "WT"
+                        else f"to {g['sublibrary'].iloc[0]}") for g in groups],
+                edgecolor="white", linewidth=0.4)
+        if show_variable_region and len(coding):
+            ax.hist(coding, bins=edges, histtype="step", color="0.35", lw=1.2, ls=":",
+                    label="coding region only")
+        ax.set_xlim(edges[0], edges[-1])
+        ax.set_xlabel("GC fraction of the ordered molecule")
+        ax.tick_params(labelsize=8)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+
+    detail.set_ylabel("members")
+    detail.set_title("At its own scale", loc="left", fontsize=10)
+    window.set_title(f"Against gc_bounds ({bounds[0]:.0%} to {bounds[1]:.0%})" if bounds
+                     else "gc_bounds not set", loc="left", fontsize=10)
+    window.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=8)
+    fig.suptitle(f"GC distribution, {spec.name}  ({len(table)} members)", x=0.005, ha="left",
+                 fontsize=13)
     return _apply_font(fig)

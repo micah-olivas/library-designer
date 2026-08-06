@@ -18,7 +18,10 @@ library that names a starting vector adds the adaptor-against-the-plasmid checks
 ``checks/vector.py``, which is the only place a construct that looks clean on its own can
 be caught not fitting the backbone it is meant to clone into.
 
-One more runs on any library that carries constant flanks. ``checks/mispriming.py`` asks
+Two more run on any library that carries constant flanks. ``checks/cleavage.py`` measures how
+far each Type IIS site sits from the end of the molecule: a site flush against the end cuts
+poorly, which costs yield rather than correctness, so it is an advisory.
+ ``checks/mispriming.py`` asks
 whether the flanks the pool is amplified with, a tile's primer pair or the shared adaptors,
 anneal anywhere they should not: inside a variable region, inside another oligo's flank, or in
 the destination-vector backbone. That is a PCR failure rather than a cloning one, so it is
@@ -115,6 +118,11 @@ class CheckReport:
     enzyme_hits: dict[str, list[str]] = field(default_factory=dict)
     motif_hits: dict[str, list[str]] = field(default_factory=dict)
     length_exceeded: list[str] = field(default_factory=list)
+    # Members whose ordered molecule sits outside spec.gc_bounds. Empty when the gate is off.
+    gc_out_of_range: list[str] = field(default_factory=list)
+    # Members whose ordered molecule carries a single-base run longer than
+    # spec.max_homopolymer. Empty when the gate is off.
+    homopolymer_hits: list[str] = field(default_factory=list)
     # Tiled-assembly checks (empty unless the library was .tile()'d)
     oligo_extra_sites: list[str] = field(default_factory=list)   # unintended enzyme site (incl. junctions)
     oligo_over_budget: list[str] = field(default_factory=list)   # oligo longer than the budget
@@ -140,6 +148,9 @@ class CheckReport:
     # Informational only: overhang pairs that share more homology than they should without
     # being an outright collision. See checks/overhangs.py and lib.overhang_pairs().
     overhang_advisories: list[str] = field(default_factory=list)
+    # Informational: a recognition site sitting too close to the end of the molecule to cut
+    # efficiently. See checks/cleavage.py.
+    cleavage_advisories: list[str] = field(default_factory=list)
     # Informational only: a constant flank whose 3' end anneals somewhere it should not
     # without the whole flank occurring there. See checks/mispriming.py and lib.mispriming().
     mispriming_advisories: list[str] = field(default_factory=list)
@@ -161,6 +172,8 @@ class CheckReport:
             and not any(self.enzyme_hits.values())
             and not any(self.motif_hits.values())
             and not self.length_exceeded
+            and not self.gc_out_of_range
+            and not self.homopolymer_hits
             and not self.oligo_extra_sites
             and not self.oligo_over_budget
             and not self.overhang_issues
@@ -216,6 +229,14 @@ class CheckReport:
         if self.length_exceeded:
             rows.append(("length",
                          f"{len(self.length_exceeded)} over max_oligo_length{_names(self.length_exceeded)}"))
+        if self.gc_out_of_range:
+            rows.append(("GC window",
+                         f"{len(self.gc_out_of_range)} outside gc_bounds"
+                         f"{_names(self.gc_out_of_range)}"))
+        if self.homopolymer_hits:
+            rows.append(("homopolymers",
+                         f"{len(self.homopolymer_hits)} with a run over max_homopolymer"
+                         f"{_names(self.homopolymer_hits)}"))
         # Checks that report member names keep them on the row. Checks that report whole
         # sentences get the count on the row and the sentences underneath, since a paragraph
         # wedged into parentheses runs off the screen and hides the column.
@@ -274,7 +295,9 @@ class CheckReport:
     _CHECKS_BEFORE_PATTERNS = ("optimization_failed", "translation_fail",
                                "off_target_edits")
     _CHECKS_AFTER_PATTERNS = (
-        "length_exceeded", "oligo_extra_sites", "oligo_over_budget", "overhang_issues",
+        "length_exceeded", "gc_out_of_range", "homopolymer_hits", "oligo_extra_sites",
+        "oligo_over_budget",
+        "overhang_issues",
         "unplaced", "vector_extra_sites", "adaptor_issues", "mispriming_issues",
         "assembly_issues",
     )
@@ -318,10 +341,10 @@ class CheckReport:
 
     @property
     def advisories(self) -> list[str]:
-        """Every informational list in one, the reference ones, then the overhang ones, then
-        the mispriming ones. Worth reading, but they never affect ``passed`` or ``issues``."""
+        """Every informational list in one, in reporting order: reference, overhang,
+        mispriming, cleavage. They never affect ``passed`` or ``issues``."""
         return (list(self.reference_advisories) + list(self.overhang_advisories)
-                + list(self.mispriming_advisories))
+                + list(self.mispriming_advisories) + list(self.cleavage_advisories))
 
     def to_dict(self) -> dict:
         """The whole report as plain data, every field plus ``passed``, ``issues``, and
@@ -387,6 +410,104 @@ def off_target_edits(library) -> list[str]:
     return out
 
 
+def ordered_molecules(library) -> dict[str, str]:
+    """What each member is physically ordered as, by name.
+
+    A tiled library orders the assembled oligo, primers and enzyme sites included; anything
+    else orders the whole construct with its adaptors. That is the molecule a vendor's spec is
+    written against, so it is the one the GC and length gates judge. Members with nothing to
+    order (a failed optimization, or the global ``WT`` row of a tiled pool) are left out.
+    """
+    df = library.df
+    if "variable_dna" not in df.columns:
+        return {}
+    if getattr(library, "tiles", None) is not None:
+        return {str(n): o for n, o in zip(df["name"], df.get("oligo", []))
+                if isinstance(o, str)}
+    return {
+        str(n): assemble(a5, dna, a3)
+        for n, a5, dna, a3 in zip(df["name"], df["adaptor_5"], df["variable_dna"],
+                                  df["adaptor_3"])
+        if isinstance(dna, str)
+    }
+
+
+def gc_fraction(seq: str) -> float:
+    """G+C as a fraction of ``seq``, 0.0 for an empty sequence."""
+    up = seq.upper()
+    return (up.count("G") + up.count("C")) / len(up) if up else 0.0
+
+
+def gc_table(library) -> pd.DataFrame:
+    """Per-member GC, one row per molecule that is ordered.
+
+    ``ordered_gc`` is the number the ``gc_bounds`` gate judges, the whole molecule with its
+    flanks. ``variable_gc`` is the coding region alone, which the gate ignores and which sits
+    lower whenever the flanks are GC-rich. ``sublibrary`` is the residue each member mutates
+    to, ``"WT"`` for the control, so a distribution can be split by scan. ``in_bounds`` is NA
+    when no bounds are set.
+    """
+    ordered = ordered_molecules(library)
+    df = library.df
+    sub = dict(zip(df["name"].astype(str),
+                   df["mut_residue"] if "mut_residue" in df.columns else [pd.NA] * len(df)))
+    variable = dict(zip(df["name"].astype(str), df.get("variable_dna", [])))
+    bounds = library.spec.gc_bounds
+    rows = []
+    for name, molecule in ordered.items():
+        gc = gc_fraction(molecule)
+        coding = variable.get(name)
+        rows.append({
+            "name": name,
+            "sublibrary": "WT" if pd.isna(sub.get(name)) else str(sub[name]),
+            "ordered_gc": gc,
+            "variable_gc": gc_fraction(coding) if isinstance(coding, str) else pd.NA,
+            "in_bounds": (bounds[0] <= gc <= bounds[1]) if bounds else pd.NA,
+        })
+    return pd.DataFrame(rows, columns=["name", "sublibrary", "ordered_gc", "variable_gc",
+                                       "in_bounds"])
+
+
+def longest_run(seq: str) -> int:
+    """The longest single-base run in ``seq``, 0 for an empty one."""
+    return max((len(m.group()) for m in re.finditer(r"(.)\1*", seq.upper())), default=0)
+
+
+def homopolymer_hits(library) -> list[str]:
+    """Members whose ordered molecule carries a run longer than ``spec.max_homopolymer``.
+
+    Judged on the whole molecule, so a run spelled across an adaptor-to-CDS junction counts.
+    The optimizer cannot see that junction: it constrains the coding region, and the flanks are
+    added afterwards, which is why this is checked again here rather than assumed.
+
+    Counted absolutely rather than against the wild-type baseline, unlike the enzyme and motif
+    screens. An adaptor's Type IIS site is there on purpose and a native CDS's motif was
+    accepted by whoever supplied it, but nobody intends a long homopolymer, so one already
+    present is a finding too.
+    """
+    limit = library.spec.max_homopolymer
+    if not limit:
+        return []
+    return [name for name, seq in ordered_molecules(library).items()
+            if longest_run(seq) > limit]
+
+
+def gc_out_of_range(library) -> list[str]:
+    """Members whose ordered molecule falls outside ``spec.gc_bounds``.
+
+    Judged on the whole molecule rather than the coding region, since that is what the
+    synthesiser receives and what a vendor's GC window refers to. Empty when no bounds are
+    set, which is the default: the package ships no vendor registry, so the window is stated
+    by the caller (Twist recommend 0.35 to 0.65 for oligo pools).
+    """
+    bounds = library.spec.gc_bounds
+    if not bounds:
+        return []
+    lo, hi = bounds
+    return [name for name, seq in ordered_molecules(library).items()
+            if not lo <= gc_fraction(seq) <= hi]
+
+
 def check_library(library) -> CheckReport:
     spec, df = library.spec, library.df
     if "variable_dna" not in df.columns:
@@ -443,7 +564,7 @@ def check_library(library) -> CheckReport:
 
     report = CheckReport(
         len(df), opt_failed, translation_fail, off_target_edits(library), enzyme_hits,
-        motif_hits, length_exceeded,
+        motif_hits, length_exceeded, gc_out_of_range(library), homopolymer_hits(library),
     )
     if getattr(library, "tiles", None) is not None:
         from .tiled import check_tiled
@@ -474,6 +595,11 @@ def check_library(library) -> CheckReport:
     from .mispriming import mispriming_findings
 
     report.mispriming_issues, report.mispriming_advisories = mispriming_findings(library)
+    # Runs on anything carrying flanks, tiled or not, since the site's distance from the end is
+    # a property of the flank rather than of how the library is cloned.
+    from .cleavage import cleavage_advisories
+
+    report.cleavage_advisories = cleavage_advisories(library)
 
     # Then put the construct together: digest, ligate, and align the product against the
     # parent. Needs something to assemble into, so a library with no destination vector

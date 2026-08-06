@@ -149,21 +149,77 @@ lib.check(fmt="text")     # the report as a plain string, for a log
 lib.check(fmt="dict")     # every field plus passed/issues/advisories, ready for JSON
 ```
 
-`export_all` writes two QC figures, both into a `qc/` subdirectory of the run. `codon_usage.png`
-plots host codon-usage frequency along the CDS, the WT as a line and each substitution's codon
-as a point. `codon_matrix.png` is the codon map: codons down the y axis grouped by amino acid,
+`export_all` writes two QC figures, both into a `qc/` subdirectory of the run and both vector
+PDFs. `codon_usage.pdf` plots host codon-usage frequency along the CDS, the WT as a line and
+each substitution's codon as a point. `codon_matrix.pdf` is the codon map: codons down the y
+axis grouped by amino acid,
 each group divided by a rule and labelled with one letter in the margin, CDS position across
 the x axis, and each cell counting the members carrying that codon there. The frozen reference
 reads as a dark path and the stamped substitutions as pale marks off it, so a codon drawn
-low in its own band is one the design had to compromise on. `lib.plot_codon_matrix()`
-returns it for a notebook, with `reference_only=True` to plot the WT alone.
+low in its own band is one the design had to compromise on. Residues the `truncation` dropped
+are greyed columns either side of the designed window, lettered in grey along the top, so the
+map covers the whole protein its numbering refers to. `lib.plot_codon_matrix()` returns it for
+a notebook, with `reference_only=True` to plot the WT alone.
 
-Every plotting call takes `dpi`, and one number governs both the inline figure and the file
-written from it. The default is 200 rather than matplotlib's 100, because the codon map draws
-each cell a couple of pixels wide and a long CDS goes soft at the lower setting. Raise it for
-a figure headed into a manuscript: `lib.plot_codon_matrix(dpi=600)`,
-`lib.to_qc_plots(path, dpi=600)`, or `lib.export_all("out", dpi=600)` for both QC images at
-once.
+Every figure is typeset in Arial, with Helvetica and DejaVu Sans behind it on a machine that
+has no Arial. The PDFs keep their text as embedded TrueType rather than Type 3 outlines, so a
+label opens selectable in Illustrator and the font is named in the file. The font is set per
+figure, not through `rcParams`, so importing this package does not change how your own plots
+look.
+
+Every plotting call takes `dpi`, and one number governs both the inline figure and any raster
+file saved from it. The default is 200 rather than matplotlib's 100, because the codon map
+draws each cell a couple of pixels wide and a long CDS goes soft at the lower setting. It is
+worth raising for a PNG (`lib.plot_codon_matrix(dpi=600)`, `lib.to_qc_plots(path, dpi=600)`)
+and does nothing for the exported PDFs, which scale on their own.
+
+`lib.plot_gc_distribution()` plots the pool's GC in two panels: the distribution at its own
+scale, where a bimodal pool or an outlier shows up, and the same against the `gc_bounds` window,
+so the margin to the vendor's limits is read off the plot. Bars stack by sublibrary, which
+separates the scans, since swapping a codon for `TAG` and for `GCG` move GC in opposite
+directions, and the coding region alone is overlaid for comparison. `lib.gc_table()` is the
+per-member frame behind it. `export_all` writes the figure to `qc/gc_distribution.pdf`.
+
+QC also measures how far each Type IIS site sits from the end of the oligo. A site flush
+against the end cuts poorly, since the enzyme needs duplex either side of its recognition
+sequence to bind, so an adaptor written as `GGTCTC` + spacer + overhang puts the site at base 1
+of every oligo in the pool and loses yield to under-cutting. Adding a few lead-in bases fixes
+it: `adaptor_5="gcgtcggtctccaagc"` rather than `"ggtctccaagc"`. A tiled oligo gets its lead-in
+free, since the amplification primer sits 5' of the site. This is reported in
+`rep.cleavage_advisories`, not as a failure, because the design is makeable and the call
+belongs to whoever is ordering.
+
+`max_homopolymer` is the longest single-base run to allow, so `max_homopolymer=7` avoids runs
+of 8 or more. Long runs are hard to synthesize accurately and hard to read through, and vendors
+flag them. Unlike the other gates this one is both prevented and checked: DNA Chisel avoids
+runs while optimizing the reference, the stamp will not introduce one at a mutated codon, and
+QC screens the finished molecule under `homopolymer_hits`. That last step matters because the
+optimizer only ever sees the coding region, so a run finished off by an adaptor is invisible to
+it and turns up only on the assembled construct.
+
+`gc_bounds` gates the GC content of the molecule you order. Twist recommend 35% to 65% for
+oligo pools, so `gc_bounds=(0.35, 0.65)` turns that check on; `(35, 65)` means the same
+window, and mixing the two forms is refused rather than guessed at. QC then reports any member
+outside it under `gc_out_of_range`. It is off by default, because the package ships no vendor
+registry, the same reason `max_oligo_length` is yours to set.
+
+The gate judges the whole ordered molecule, the assembled oligo for a tiled library or the
+construct with its adaptors otherwise, since that is what the synthesiser receives and what a
+vendor's window refers to. That is a different number from `optimization.gc_min` / `gc_max`,
+which DNA Chisel enforces on the coding region while optimizing. `to_full_csv` writes both:
+`gc_content` for the variable region and `ordered_gc` for the molecule the gate judges.
+
+`mask_positions` leaves positions out of the scan without taking them out of the construct.
+Pass 1-based positions on `protein_sequence`, the same numbering variant names use:
+`mask_positions=[1, 2]` gives no variants at the first two residues while every oligo still
+carries and encodes them. Use it for residues you do not want varied, a tag or a catalytic
+site, and for the first codons after a start. Masking every scannable position raises rather
+than handing back a library of nothing but the wild-type control.
+
+That is the difference from `truncation`, which takes residues out of the designed region
+altogether: masking keeps them in the reference and on the oligo, truncating does not encode
+them at all and, with a starting vector, has the plasmid supply them. Both count positions on
+the full protein, so they compose.
 
 `truncation` drops residues from the designed region, and `truncation_terminus` says which
 end they come off, `"N"` (the default, an initiator Met or a leader) or `"C"` (a tail such as
@@ -516,8 +572,8 @@ variable region to write. With a starting vector set the cloning outputs come to
 standard library. Pass `vectors=False` to leave the cloning outputs out, or
 `oligos=False` to skip the per-oligo directory.
 
-Both QC plots come as well, in a `qc/` subdirectory: `codon_usage.png` and
-`codon_matrix.png`. Pass `plots=False` to skip them.
+Both QC plots come as well, in a `qc/` subdirectory: `codon_usage.pdf` and
+`codon_matrix.pdf`. Pass `plots=False` to skip them.
 
 The per-oligo files land in `oligos/`, one per member. They are annotated GenBank by
 default, marking the coding stretch the oligo carries, the mutated codon, and every Type
