@@ -58,8 +58,8 @@ class SubstitutionScan:
         positions. A ``*`` in the input protein is skipped as a position too, and so is any
         position in ``spec.mask_positions``, which leaves the residue in the construct but out
         of the scan. Masking every scannable position raises rather than handing back a library
-        of nothing but the wild-type control. Names carry
-        full-protein numbering even when ``truncation`` is set, so ``K7A`` means residue 7 of
+        of nothing but the wild-type control. Names carry full-protein numbering even when
+        ``truncation`` is set, so ``K7A`` means residue 7 of
         the protein you supplied. Two substitutions that resolve to the same residue symbol
         at one position would collide, and that raises rather than silently dropping one.
 

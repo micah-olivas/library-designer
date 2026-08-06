@@ -105,7 +105,7 @@ lib = SubstitutionScan(spec).generate().codon_optimize()
 print(lib.summary())
 
 out = lib.run_dir("out")                                    # out/my_library_20260724_143210
-lib.to_full_csv(out / "my_library_full.csv")                # master table with length and gc_content
+lib.to_full_csv(out / "my_library_full.csv")                # master table with lengths and GC columns
 lib.to_usortm(out / "variants.csv")                         # name,sequence for a downstream pooling/QC plan
 lib.to_vendor(out / "order.csv")                            # order form, method taken from spec.platform
 lib.to_design_specs(out / "my_library_design_specs.json")   # run record: spec, params, seed, versions
@@ -125,7 +125,7 @@ By default, `codon_optimize()` optimizes the WT CDS once into a frozen reference
 
 When the preferred codon for a mutated residue would spell a forbidden motif, the stamp steps down that residue's usage ranking and takes the next codon that avoids it, so the variant is still makeable at a rarer codon. Set `CodonOptimizationParams(synonymous_fallback=False)` to be told instead. The position then lands in `lib.failed` with the codon named, and no rarer codon is substituted. A pinned literal codon has no synonymous alternative, so it is placed verbatim and flagged either way.
 
-`lib.summary()` returns a `LibrarySummary` with variant counts per sublibrary, the codon-optimization parameters, the adaptor regions and construct length range, the synthesis platform, and the QC report. Printing it keeps only the lines that say something, so an empty adaptor pair, an unset GC bound, and a check that found nothing do not crowd out the ones that need reading. A tiled library shows its tiles and oligo lengths in place of a construct length, since the oligo is what you order.
+`lib.summary()` returns a `LibrarySummary` with variant counts per sublibrary, the codon-optimization parameters, the adaptor regions and construct length range, the GC spread of the molecule you order, the synthesis platform, and the QC report. Printing it keeps only the lines that say something, so an empty adaptor pair, an unset GC bound, and a check that found nothing do not crowd out the ones that need reading. A tiled library shows its tiles and oligo lengths in place of a construct length, since the oligo is what you order. The `gc` line gives the pool's range and median, and with `gc_bounds` set it adds how many points of GC the pool has to spare against that window.
 
 A single-mutant library is only interpretable if every
 member matches the WT outside its own codon, otherwise a phenotype cannot be
@@ -149,17 +149,18 @@ lib.check(fmt="text")     # the report as a plain string, for a log
 lib.check(fmt="dict")     # every field plus passed/issues/advisories, ready for JSON
 ```
 
-`export_all` writes two QC figures, both into a `qc/` subdirectory of the run and both vector
+`export_all` writes three QC figures into a `qc/` subdirectory of the run, all of them vector
 PDFs. `codon_usage.pdf` plots host codon-usage frequency along the CDS, the WT as a line and
 each substitution's codon as a point. `codon_matrix.pdf` is the codon map: codons down the y
-axis grouped by amino acid,
-each group divided by a rule and labelled with one letter in the margin, CDS position across
-the x axis, and each cell counting the members carrying that codon there. The frozen reference
+axis grouped by amino acid, each group divided by a rule and labelled with one letter in the
+margin, CDS position across the x axis, and each cell counting the members carrying that codon
+there. The frozen reference
 reads as a dark path and the stamped substitutions as pale marks off it, so a codon drawn
 low in its own band is one the design had to compromise on. Residues the `truncation` dropped
 are greyed columns either side of the designed window, lettered in grey along the top, so the
 map covers the whole protein its numbering refers to. `lib.plot_codon_matrix()` returns it for
-a notebook, with `reference_only=True` to plot the WT alone.
+a notebook, with `reference_only=True` to plot the WT alone. `gc_distribution.pdf` is the
+third, the pool's GC against the window you set, covered a few paragraphs down.
 
 Every figure is typeset in Arial, with Helvetica and DejaVu Sans behind it on a machine that
 has no Arial. The PDFs keep their text as embedded TrueType rather than Type 3 outlines, so a
@@ -214,7 +215,8 @@ Pass 1-based positions on `protein_sequence`, the same numbering variant names u
 `mask_positions=[1, 2]` gives no variants at the first two residues while every oligo still
 carries and encodes them. Use it for residues you do not want varied, a tag or a catalytic
 site, and for the first codons after a start. Masking every scannable position raises rather
-than handing back a library of nothing but the wild-type control.
+than handing back a library of nothing but the wild-type control, and so does a position
+outside the protein, which usually means the numbering came from a different sequence.
 
 That is the difference from `truncation`, which takes residues out of the designed region
 altogether: masking keeps them in the reference and on the oligo, truncating does not encode
@@ -572,8 +574,9 @@ variable region to write. With a starting vector set the cloning outputs come to
 standard library. Pass `vectors=False` to leave the cloning outputs out, or
 `oligos=False` to skip the per-oligo directory.
 
-Both QC plots come as well, in a `qc/` subdirectory: `codon_usage.pdf` and
-`codon_matrix.pdf`. Pass `plots=False` to skip them.
+The QC plots come as well, in a `qc/` subdirectory: `codon_usage.pdf`, `codon_matrix.pdf`, and
+`gc_distribution.pdf`. A `SequenceSet` has no shared reference to plot codon usage against, so
+it gets the other two. Pass `plots=False` to skip the directory.
 
 The per-oligo files land in `oligos/`, one per member. They are annotated GenBank by
 default, marking the coding stretch the oligo carries, the mutated codon, and every Type

@@ -3,7 +3,8 @@
 library serializes several ways.
 
 - ``to_full_csv`` writes the master table (the region columns plus the assembled
-  uppercase sequence, length, and GC) and may include failed rows for inspection.
+  uppercase sequence, length, and GC for both the variable region and the whole ordered
+  molecule) and may include failed rows for inspection.
 - ``to_usortm`` writes the uSort-M input, ``name,sequence`` in the case-encoded
   wire format (flanking lowercase), derived only at this boundary.
 - ``to_vendor`` writes the synthesis-provider order form, method-aware (pooled or arrayed).
@@ -91,9 +92,9 @@ def to_full_csv(library, path: str | Path) -> None:
     is ordered (the assembled oligo for a tiled library, the construct otherwise, which is
     what ``spec.gc_bounds`` judges), and ``stamp_adaptiveness``, the
     relative adaptiveness of the codon this variant carries at its own position. The
-    last two are rounded to three places. ``stamp_adaptiveness`` is NA wherever there is
+    last three are rounded to three places. ``stamp_adaptiveness`` is NA wherever there is
     no stamped position, so for the wild-type control and for every member of a sequence
-    set. Those four columns and the region columns are grouped 5'->3' at the right of
+    set. Those five columns and the region columns are grouped 5'->3' at the right of
     the table.
 
     Unlike the order-form exporters, this one keeps rows whose optimization failed, with

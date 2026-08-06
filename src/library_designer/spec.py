@@ -213,7 +213,9 @@ class LibrarySpec:
     round-trip through its own design-specs JSON. ``protein_sequence`` and ``cds`` lose
     their whitespace and are uppercased, and anything outside their alphabet is refused,
     since an unchecked ambiguity code would quietly design a library for a different
-    protein.
+    protein. ``gc_bounds`` given as percentages comes back as fractions, and
+    ``mask_positions`` comes back sorted with duplicates dropped, so a spec reads the same
+    however it was written.
 
     Setting ``uniprot`` with no ``protein_sequence`` fetches the entry when the spec is
     constructed, and only then. See ``resolve_uniprot``.
@@ -443,7 +445,8 @@ class LibrarySpec:
         limit is unset.
 
         Written per base rather than as one alternation, because these go to DNA Chisel as
-        separate constraints and it reports which one a sequence broke.
+        separate constraints and it reports which one a sequence broke. The stamp checks the
+        same patterns when it places a codon (see ``optimize/backbone.py``).
         """
         n = self.max_homopolymer
         return [f"{base}{{{n + 1},}}" for base in "ACGT"] if n else []

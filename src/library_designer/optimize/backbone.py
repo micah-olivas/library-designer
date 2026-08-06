@@ -14,8 +14,8 @@ Three rules govern how a variant's DNA is designed.
    different members. Checked at runtime by ``checks/report.off_target_edits``.
 2. **A blocked codon steps down the ranking.** When the preferred codon for the target
    residue would introduce a restricted motif (a Golden Gate site, a Shine-Dalgarno
-   motif), try that residue's codons from most- to least-frequent and take the first
-   that does not. Only the mutated codon changes.
+   motif, a single-base run over ``spec.max_homopolymer``), try that residue's codons from
+   most- to least-frequent and take the first that does not. Only the mutated codon changes.
    ``spec.optimization.synonymous_fallback = False`` opts out of the stepping, for callers
    who would rather be told about the position than build it at a rarer codon.
 3. **Exhausting the codons raises a flag.** If no codon for the residue avoids the

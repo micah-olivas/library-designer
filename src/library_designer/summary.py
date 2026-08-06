@@ -1,6 +1,7 @@
 """Library summary. QC plus the structural metadata you need to review or order a
 library at a glance: variant counts per sublibrary, the codon-optimization
-parameters used, the adaptor regions, and the selected synthesis platform.
+parameters used, the adaptor regions, the GC spread of the molecule that is ordered, and
+the selected synthesis platform.
 """
 from __future__ import annotations
 
@@ -37,7 +38,10 @@ class LibrarySummary:
     and their lengths, plus the construct-length range once at least one member has been
     optimized. ``tiles`` fills in only for a tiled library, where the oligo and not the
     construct is what gets ordered. ``qc`` is None until ``codon_optimize()`` has run,
-    because there are no sequences to check before that.
+    because there are no sequences to check before that, and so is ``gc``, which holds the
+    min, median, and max GC of the ordered molecule plus the ``spec.gc_bounds`` window it is
+    read against. The printed line adds how many points of GC the pool has to spare against
+    that window, since QC already names any member outside it.
 
     Printing keeps only the lines that say something. An empty adaptor pair, an unset GC
     window, and a sequence set's single bucket are all left out, and a tiled library shows

@@ -1,5 +1,10 @@
 """QC over an optimized library: optimization success, translation round-trip,
-restriction sites, forbidden motifs, and (if set) the synthesis length cap.
+restriction sites, forbidden motifs, and, when the spec sets them, the synthesis length cap,
+the GC window, and the homopolymer limit.
+
+The last two judge the molecule that is ordered, the assembled oligo for a tiled library and
+the construct with its adaptors otherwise, which is what a vendor's spec is written against.
+``ordered_molecules`` builds those sequences and the GC and homopolymer screens read them.
 
 Restriction-site and motif checks run on the **fully assembled construct**
 (``adaptor_5 + variable_dna + adaptor_3``) against an *assembled-WT baseline* (the
@@ -20,9 +25,8 @@ be caught not fitting the backbone it is meant to clone into.
 
 Two more run on any library that carries constant flanks. ``checks/cleavage.py`` measures how
 far each Type IIS site sits from the end of the molecule: a site flush against the end cuts
-poorly, which costs yield rather than correctness, so it is an advisory.
- ``checks/mispriming.py`` asks
-whether the flanks the pool is amplified with, a tile's primer pair or the shared adaptors,
+poorly, which costs yield rather than correctness, so it is an advisory. ``checks/mispriming.py``
+asks whether the flanks the pool is amplified with, a tile's primer pair or the shared adaptors,
 anneal anywhere they should not: inside a variable region, inside another oligo's flank, or in
 the destination-vector backbone. That is a PCR failure rather than a cloning one, so it is
 checked on the flanks and the sequence around them and not on the assembled plasmid.
@@ -91,6 +95,12 @@ class CheckReport:
     or not. Optimization, translation, enzyme sites, motifs, and the length cap are checked
     on every optimized library.
 
+    ``gc_out_of_range`` and ``homopolymer_hits`` fill in only when the spec sets ``gc_bounds``
+    or ``max_homopolymer``, and both are read off the molecule that is ordered, the assembled
+    oligo for a tiled library and the construct with its adaptors otherwise. A homopolymer is
+    counted absolutely rather than against the wild-type baseline the enzyme and motif screens
+    use, since a long run already in the reference is a finding too.
+
     ``reference_advisories`` is informational and stays out of ``passed``. It reports what a
     reference kept verbatim carries (a native BsaI site, an avoid-motif) rather than
     treating it as a failure, because the user opted into that sequence. It comes from the
@@ -107,6 +117,12 @@ class CheckReport:
     anneals somewhere it should not without the whole flank occurring there, which primes or
     does not depending on the annealing temperature you run at. ``lib.mispriming()`` is the
     full table.
+
+    ``cleavage_advisories`` is the last of the informational ones. It names an end whose Type
+    IIS recognition site sits so close to the end of the molecule that the enzyme has little
+    duplex to hold, which costs yield rather than correctness, and says where to add lead-in
+    bases. It fills in for any library carrying a flank with a site in it. See
+    ``checks/cleavage.py``.
     """
 
     n_variants: int
@@ -313,8 +329,9 @@ class CheckReport:
         the count mismatch that has no list of its own.
 
         Entries are variant names for the checks that judge members one at a time
-        (optimization, translation, enzyme and motif hits, length, the oligo checks,
-        ``unplaced``) and sentences for the ones that judge the design as a whole
+        (optimization, translation, enzyme and motif hits, length, the GC and homopolymer
+        gates, the oligo checks, ``unplaced``) and sentences for the ones that judge the
+        design as a whole
         (``overhang_issues``, ``vector_extra_sites``, ``adaptor_issues``,
         ``mispriming_issues``, ``assembly_issues``). Advisories are not here, they are not
         failures; see ``advisories``.
@@ -443,12 +460,17 @@ def gc_table(library) -> pd.DataFrame:
 
     ``ordered_gc`` is the number the ``gc_bounds`` gate judges, the whole molecule with its
     flanks. ``variable_gc`` is the coding region alone, which the gate ignores and which sits
-    lower whenever the flanks are GC-rich. ``sublibrary`` is the residue each member mutates
-    to, ``"WT"`` for the control, so a distribution can be split by scan. ``in_bounds`` is NA
-    when no bounds are set.
+    lower whenever the flanks are GC-rich. ``in_bounds`` is NA when no bounds are set.
+
+    ``sublibrary`` is the residue each member mutates to, ``"WT"`` for the control, so a
+    distribution can be split by scan. A sequence set is not a scan and has no mutated residue,
+    so its members go in one ``"members"`` bucket, matching ``LibrarySummary.per_sublibrary``.
+    Each member is still named individually in ``name``, which for a set built from a FASTA is
+    the header it came in under.
     """
     ordered = ordered_molecules(library)
     df = library.df
+    set_kind = getattr(library, "kind", "scan") == "sequence_set"
     sub = dict(zip(df["name"].astype(str),
                    df["mut_residue"] if "mut_residue" in df.columns else [pd.NA] * len(df)))
     variable = dict(zip(df["name"].astype(str), df.get("variable_dna", [])))
@@ -459,7 +481,10 @@ def gc_table(library) -> pd.DataFrame:
         coding = variable.get(name)
         rows.append({
             "name": name,
-            "sublibrary": "WT" if pd.isna(sub.get(name)) else str(sub[name]),
+            # A sequence set carries the column but leaves it NA on every row, so reading NA as
+            # the wild-type control would file every design under "WT".
+            "sublibrary": ("members" if set_kind
+                           else "WT" if pd.isna(sub.get(name)) else str(sub[name])),
             "ordered_gc": gc,
             "variable_gc": gc_fraction(coding) if isinstance(coding, str) else pd.NA,
             "in_bounds": (bounds[0] <= gc <= bounds[1]) if bounds else pd.NA,

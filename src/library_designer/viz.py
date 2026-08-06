@@ -1,10 +1,17 @@
-"""QC visualization: codon usage, the tile layout, and overhang homology.
+"""QC visualization: codon usage, the codon map, the GC distribution, the tile layout, and
+overhang homology.
 
 The codon-usage figure plots relative codon adaptiveness (w = freq / best-synonymous-freq;
 1.0 = optimal codon) along the CDS: the WT CDS as a line, and each variant's stamped
 codon as a point coloured by sublibrary. Points below the threshold flag codons the
 motif-avoidance had to compromise on. Amber (`*`) stamps sit low, since a stop codon is
 pinned rather than optimized.
+
+The codon map puts codons down the y axis and CDS position across the x axis, with each cell
+counting the members that carry that codon there.
+
+The GC figure is the review surface for the synthesis gate, the pool's GC against
+`spec.gc_bounds` (see `checks/report.gc_table`).
 
 The overhang figure is the review surface for Golden Gate specificity, every fused overhang
 against every other (see `checks/overhangs.py`).
@@ -549,6 +556,13 @@ def codon_matrix_figure(library, log: bool = True, reference_only: bool = False,
     return _apply_font(fig)
 
 
+def _gc_group_label(sublibrary: str) -> str:
+    """How a ``gc_table`` sublibrary reads in the GC legend. A scan's buckets are residues, so
+    they read as "to A". The wild-type control and a sequence set's single bucket are named
+    outright, since "to WT" and "to members" say the wrong thing."""
+    return {"WT": "WT control", "members": "members"}.get(sublibrary, f"to {sublibrary}")
+
+
 def gc_distribution_figure(library, bins: int = 24, show_variable_region: bool = True,
                            dpi: int = DEFAULT_DPI):
     """Return a matplotlib Figure of the pool's GC distribution, in two panels.
@@ -556,14 +570,19 @@ def gc_distribution_figure(library, bins: int = 24, show_variable_region: bool =
     The left panel is the distribution at its own scale, where a bimodal pool or a stray
     outlier shows up. The right panel puts the whole ``spec.gc_bounds`` window in view, so the
     margin to the vendor's limits is read off the plot rather than inferred. A pool is usually
-    tight enough that one panel cannot do both.
+    tight enough that one panel cannot do both. With no window set there is nothing to widen
+    to, so both panels show the same range and the right one says the bounds are unset.
 
     GC is measured on the molecule that is ordered, the assembled oligo for a tiled library and
     the construct with its adaptors otherwise, since that is what ``gc_bounds`` gates and what
     a vendor's window refers to. Bars are stacked by sublibrary, which separates the scans:
-    swapping a codon for ``TAG`` and for ``GCG`` move GC in opposite directions.
+    swapping a codon for ``TAG`` and for ``GCG`` move GC in opposite directions. A sequence set
+    has no scans to separate, so its members stack as one bucket.
     ``show_variable_region`` overlays the coding region alone, which the gate ignores and which
     sits lower whenever the flanks are GC-rich.
+
+    Raises when there is nothing ordered to measure, before ``codon_optimize()`` or on a tiled
+    library that has not been ``tile()``'d.
     """
     import numpy as np
 
@@ -601,8 +620,7 @@ def gc_distribution_figure(library, bins: int = 24, show_variable_region: bool =
         edges = np.linspace(lo - pad, hi + pad, bins + 1)
 
         ax.hist([g["ordered_gc"] for g in groups], bins=edges, stacked=True,
-                label=[("WT control" if g["sublibrary"].iloc[0] == "WT"
-                        else f"to {g['sublibrary'].iloc[0]}") for g in groups],
+                label=[_gc_group_label(g["sublibrary"].iloc[0]) for g in groups],
                 edgecolor="white", linewidth=0.4)
         if show_variable_region and len(coding):
             ax.hist(coding, bins=edges, histtype="step", color="0.35", lw=1.2, ls=":",

@@ -125,6 +125,27 @@ def test_members_are_reproducible_and_ambient_rng_independent():
     assert len(set(first)) == len(first)
 
 
+def test_gc_table_does_not_file_every_design_under_wt():
+    """``mut_residue`` is NA on every row of a set, and NA is how a scan spells its wild-type
+    control, so reading the column straight would report each design as the WT."""
+    lib = SequenceSet(_spec(), PROTEINS).generate().codon_optimize()
+    t = lib.gc_table()
+    assert set(t["sublibrary"]) == {"members"}        # one bucket, matching per_sublibrary
+    assert set(t["name"]) == set(PROTEINS)            # each design still named individually
+    assert "WT" not in set(t["sublibrary"])
+
+
+def test_the_gc_figure_names_a_sets_bucket_members():
+    import matplotlib
+    matplotlib.use("Agg")
+
+    lib = SequenceSet(_spec(gc_bounds=(0.30, 0.70)), PROTEINS).generate().codon_optimize()
+    labels = [t.get_text() for t in lib.plot_gc_distribution().axes[1].get_legend().get_texts()]
+    assert "members" in labels
+    assert "WT control" not in labels                 # a set has no wild-type control
+    assert not any(lab.startswith("to ") for lab in labels)
+
+
 def test_unseeded_sequence_set_runs():
     """seed=None must reach each member as None instead of being offset into an error."""
     import numpy as np

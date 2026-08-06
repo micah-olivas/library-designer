@@ -1,7 +1,8 @@
 """Codon optimization: a single, unified wrapper around DNA Chisel.
 
 Reverse-translate a protein and codon-optimize it under the spec's sequence rules
-(forbidden restriction sites and motifs, optional GC window). This produces the
+(forbidden restriction sites and motifs, ``max_homopolymer`` when set, optional GC
+window on the coding region). This produces the
 **frozen WT reference** in ``optimize/backbone.py``; per-variant codons are never
 set here. Mutations, including pinned literal codons such as an amber ``TAG`` or any
 forced codon, are stamped onto that reference by ``backbone._stamp``: it places a

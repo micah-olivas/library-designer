@@ -513,8 +513,11 @@ class Library:
     def check(self, fmt: str = "report"):
         """Run QC (optimization, translation, forbidden sites, length), returning a ``CheckReport``.
 
-        Those four run for every library, and so does the mispriming check on whatever constant
-        flanks it carries (see ``lib.mispriming()``). The rest depend on what it is. A tiled
+        Those four run for every library, and so do the mispriming check on whatever constant
+        flanks it carries (see ``lib.mispriming()``) and the cleavage check on how far each Type
+        IIS site sits from the end of the molecule. The two synthesis gates, ``gc_bounds`` and
+        ``max_homopolymer``, run when the spec sets them, and judge the whole molecule you
+        order rather than the coding region. The rest depend on what it is. A tiled
         library gets the per-oligo and per-tile-vector checks, a standard library with a
         starting vector gets its adaptors checked against the plasmid, and either one gets the
         assembly simulated end to end, digested, ligated, and aligned against the parent.
@@ -599,7 +602,9 @@ class Library:
         distribution at its own scale, and the same against the ``spec.gc_bounds`` window so
         the margin to the vendor's limits is visible. Measured on the molecule that is ordered,
         stacked by sublibrary, with the coding region overlaid unless
-        ``show_variable_region=False``."""
+        ``show_variable_region=False``. With no ``gc_bounds`` set both panels show the same
+        range. Needs sequences to measure, so ``codon_optimize()`` first, and ``tile()`` too
+        for a tiled library, where the oligo is what gets ordered."""
         from .viz import DEFAULT_DPI, gc_distribution_figure
 
         return gc_distribution_figure(self, bins=bins,
@@ -632,9 +637,10 @@ class Library:
         plt.close(fig)
 
     def to_qc_plots(self, path: str | Path, dpi: int | None = None) -> "Library":
-        """Save the codon-usage QC figure to an image file (format from extension). The
-        codon map is a separate figure; see ``plot_codon_matrix``. ``export_all`` writes
-        both. ``dpi`` sets the resolution of the file."""
+        """Save the codon-usage QC figure to an image file (format from extension). The codon
+        map and the GC distribution are separate figures; see ``plot_codon_matrix`` and
+        ``plot_gc_distribution``. ``export_all`` writes all three. ``dpi`` sets the resolution
+        of the file."""
         from .viz import DEFAULT_DPI, codon_usage_figure
 
         self._save_figure(codon_usage_figure(self, dpi=dpi or DEFAULT_DPI), path)
@@ -802,10 +808,12 @@ class Library:
         form, and the design-specs JSON (``<name>_design_specs.json``, the record uSort-M
         reads).
 
-        ``qc/`` holds the QC plots, both written by default and both vector PDFs:
-        ``codon_usage.pdf``, host codon-usage frequency along the CDS, and
-        ``codon_matrix.pdf``, the codon map saying which codon sits at each position, grouped
-        by amino acid. Plots are best-effort; if one can't be rendered the data files still
+        ``qc/`` holds the QC plots, all written by default and all vector PDFs:
+        ``codon_usage.pdf``, host codon-usage frequency along the CDS; ``codon_matrix.pdf``,
+        the codon map saying which codon sits at each position, grouped by amino acid; and
+        ``gc_distribution.pdf``, the pool's GC against ``spec.gc_bounds``. A ``SequenceSet``
+        has no shared reference to plot usage against, so it gets the other
+        two. Plots are best-effort; if one can't be rendered the data files still
         export (with a warning). Pass ``plots=False`` to skip the directory. ``dpi`` sets the
         resolution the figures are built at, which a PDF does not depend on, so it matters
         only if you re-save one as an image.

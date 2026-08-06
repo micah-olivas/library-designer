@@ -19,6 +19,10 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")   # headless: the build must not need a display
+# Matplotlib salts the ids it gives SVG clip paths and glyphs with a fresh uuid per figure
+# unless this is set, so the same figure came out different on every build. Any fixed string
+# does; this one names where it is used.
+matplotlib.rcParams["svg.hashsalt"] = "library-designer-docs"
 
 import matplotlib.pyplot as plt   # noqa: E402
 
@@ -34,9 +38,15 @@ BB3 = "GGTGCCTAGGCATTACGTACGTACGT"      # starts with the 3' fused overhang
 
 
 def _svg(fig) -> str:
-    """A matplotlib figure as a base64 SVG, so it embeds in the page with no side files."""
+    """A matplotlib figure as a base64 SVG, so it embeds in the page with no side files.
+
+    ``Date`` is dropped from the SVG metadata. Matplotlib writes the build time into every
+    figure otherwise, so each of these blobs changed on every build and the generated page
+    never matched the committed one.
+    """
     buf = _io.BytesIO()
-    fig.savefig(buf, format="svg", bbox_inches="tight", transparent=True)
+    fig.savefig(buf, format="svg", bbox_inches="tight", transparent=True,
+                metadata={"Date": None})
     plt.close(fig)
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
